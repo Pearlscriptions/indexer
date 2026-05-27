@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    name: Verify indexer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm run verify
+
+      - name: Fixture digest
+        run: npm run indexer:digest
+        env:
+          PRL20_CHAIN: pearl-simnet
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Secret pattern scan
+        run: |
+          if git grep -nE 'github_pat_[A-Za-z0-9_]+|-----BEGIN [A-Z ]*PRIVATE KEY-----|xprv[[:alnum:]]+|(^|[^A-Za-z])mnemonic[[:space:]]*[:=]|(^|[^A-Za-z])seed[[:space:]]*[:=]'; then
+            echo "Potential secret material found in tracked files."
+            exit 1
+          fi

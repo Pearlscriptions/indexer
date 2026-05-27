@@ -1,0 +1,48 @@
+name: Consensus or digest mismatch
+description: Report a deterministic state mismatch between indexers.
+title: "[Digest mismatch]: "
+labels:
+  - consensus
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this only when two indexers scanned the same Pearl network and the same tip height/hash but produced different state or digest output.
+  - type: input
+    id: tip
+    attributes:
+      label: Pearl tip
+      description: Height and block hash shared by the compared indexers.
+      placeholder: "height 57227, hash ..."
+    validations:
+      required: true
+  - type: textarea
+    id: digest_a
+    attributes:
+      label: Indexer A digest output
+      description: Paste sanitized `npm run indexer:digest` or `GET /indexer/digest` output.
+    validations:
+      required: true
+  - type: textarea
+    id: digest_b
+    attributes:
+      label: Indexer B digest output
+      description: Paste sanitized `npm run indexer:digest` or `GET /indexer/digest` output.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include manifest digest, chain, storage backend, and any recent reorg or resync details.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private keys, wallet seeds, database URLs with passwords, and RPC passwords.
+          required: true
+

@@ -1,0 +1,28 @@
+{
+  "name": "pearlscriptions-indexer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only Pearlscriptions and PRL-20 indexer for Pearl.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspace @pearlscriptions/prl20-core && npm run test --workspace @pearlscriptions/indexer-api",
+    "verify": "npm test",
+    "start": "npm run start --workspace @pearlscriptions/indexer-api",
+    "indexer:serve": "npm run serve --workspace @pearlscriptions/indexer-api",
+    "indexer:sync": "npm run sync --workspace @pearlscriptions/indexer-api",
+    "indexer:status": "npm run status --workspace @pearlscriptions/indexer-api",
+    "indexer:digest": "npm run digest --workspace @pearlscriptions/indexer-api",
+    "db:migrate": "node scripts/db-migrate.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "pg": "^8.21.0"
+  }
+}

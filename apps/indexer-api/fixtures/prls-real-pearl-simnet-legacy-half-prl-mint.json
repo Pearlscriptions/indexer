@@ -1,0 +1,136 @@
+{
+  "network": {
+    "chain": "pearl-simnet",
+    "source": "legacy-half-prl-browser-flow",
+    "pearlSourceCommit": "ae79b840a2b678777a1dd396a78944d40ab92f21",
+    "capturedAt": "2026-05-17T18:15:22+02:00"
+  },
+  "proof": {
+    "owner": {
+      "address": "rprl1pwjg8numcfgw83x8fjcwlqcappgm3az72jw5yzxp57ak696xjtu8qqthvc3",
+      "path": "m/86'/1'/0'/0/0",
+      "scriptPubKey": "5120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e"
+    },
+    "mintFee": {
+      "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68",
+      "scriptPubKey": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+      "valuePrl": "0.50000000"
+    },
+    "operations": [
+      {
+        "name": "deploy",
+        "commitTxid": "49b48602c74f8fb32a519caa64c7162f00a908fb666275aa2062d2b365d84491",
+        "revealTxid": "67eb87d66e6cba8ca2d6a11b8316fa279b23b025086ecf07111f79762aeec453",
+        "commitAllowed": true,
+        "revealAllowed": true,
+        "confirmedHeight": 102
+      },
+      {
+        "name": "mint",
+        "commitTxid": "c018d825e0636c28cbc954743f2d410208573e696143190e39d72683fb1a639f",
+        "revealTxid": "54b0f234d6ca4adf6853bba426005f5529392ba6ea916079a168d478fa9ea051",
+        "commitAllowed": true,
+        "revealAllowed": true,
+        "confirmedHeight": 103
+      }
+    ],
+    "notes": [
+      "Pearl simnet accepted the commit/reveal transactions and mined both operations.",
+      "The mint paid 0.5 PRL, so it is retained as carrier evidence only and is invalid under the final 1 PRL PRLS fee rule."
+    ]
+  },
+  "blocks": [
+    {
+      "height": 102,
+      "hash": "b756fd4f302a345583e8c25e6be84a8adeebbfa0fd02d301034501ec5fa19863",
+      "rawtx": [
+        {
+          "hex": "0100000000010134aa000f01507f364432939266bfda9053fda5389d9be590f06c5c13ff5f3c700000000000ffffffff02a086010000000000225120306cfb9b895d5239c64cd58f48b37e5f8f5a43c11c053016af69cf4bf223ef9687fe27324b000000225120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e0140ecb30674de5e28fad74d1e297735552ca7174ece2d231b402317b05583cb913424b69c28a602db08bb889e4fb9d8bb26c3e0172e97e232f8a84b13875356633e00000000",
+          "txid": "49b48602c74f8fb32a519caa64c7162f00a908fb666275aa2062d2b365d84491",
+          "vout": [
+            {
+              "value": 0.001,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "5120306cfb9b895d5239c64cd58f48b37e5f8f5a43c11c053016af69cf4bf223ef96",
+                "address": "rprl1pxpk0hxuft4frn3jv6k853vm7t7845s7prsznq940d885hu3ra7tqjp0xvf"
+              }
+            },
+            {
+              "value": 3229.64029063,
+              "n": 1,
+              "scriptPubKey": {
+                "hex": "5120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e",
+                "address": "rprl1pwjg8numcfgw83x8fjcwlqcappgm3az72jw5yzxp57ak696xjtu8qqthvc3"
+              }
+            }
+          ]
+        },
+        {
+          "hex": "010000000001019144d865b3d26220aa756266fb08a9002f16c764aa9c512ab38f4fc70286b4490000000000ffffffff0150c3000000000000225120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e03403df82dabf96804dfa17454e6a3880418dda038ef4f28bc5233129de1b274dfbc274366be575960a3f6e2cdd1c6c62bfabecbe8eec7ff3a367606ebaeac688eff97200aa265ae4639f78c7988bf968d6342f006227bc2b49e44a385ccdd28fab3cedaac00630670726c2d3230106170706c69636174696f6e2f6a736f6e004c577b2270223a2270726c2d3230222c226f70223a226465706c6f79222c227469636b223a2270726c73222c226d6178223a2232313030303030303030222c226c696d223a22313030303030222c22646563223a223138227d6821c00aa265ae4639f78c7988bf968d6342f006227bc2b49e44a385ccdd28fab3ceda00000000",
+          "txid": "67eb87d66e6cba8ca2d6a11b8316fa279b23b025086ecf07111f79762aeec453",
+          "vout": [
+            {
+              "value": 0.0005,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "5120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e",
+                "address": "rprl1pwjg8numcfgw83x8fjcwlqcappgm3az72jw5yzxp57ak696xjtu8qqthvc3"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "height": 103,
+      "hash": "5e20dea30d2218744c03735bfb460605b9473c86814af94c595950cd34a33a90",
+      "rawtx": [
+        {
+          "hex": "010000000001019144d865b3d26220aa756266fb08a9002f16c764aa9c512ab38f4fc70286b4490100000000ffffffff022077fc0200000000225120f8b3e8c916f8842f7b8a4fc77c5e580ba3ed47fcaeb8183837ac69ba94055d63df732b2f4b000000225120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e0140ecbbc4fdfdb8604f9b353eb9fcb03825d9ce945f20f8971f15c74ca27db9bc1486978930f995de20c6cbbc6a90913bdeae4556f8b240921021fe8c412574f3d300000000",
+          "txid": "c018d825e0636c28cbc954743f2d410208573e696143190e39d72683fb1a639f",
+          "vout": [
+            {
+              "value": 0.501,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "5120f8b3e8c916f8842f7b8a4fc77c5e580ba3ed47fcaeb8183837ac69ba94055d63",
+                "address": "rprl1plze73jgklzzz77u2flrhchjcpw3763lu46upswph435m49q9t43sweht57"
+              }
+            },
+            {
+              "value": 3229.13924063,
+              "n": 1,
+              "scriptPubKey": {
+                "hex": "5120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e",
+                "address": "rprl1pwjg8numcfgw83x8fjcwlqcappgm3az72jw5yzxp57ak696xjtu8qqthvc3"
+              }
+            }
+          ]
+        },
+        {
+          "hex": "010000000001019f631afb8326d7390e194361693e570802412d3f7454c9cb286c63e025d818c00000000000ffffffff0250c3000000000000225120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e80f0fa020000000022512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef20340293f8e22455c790e208133ff824504c83fbb86954bd4d5a8370b3ea91b4b0abdfbe9fca8123b9be169b6cd680b3df949a68f7e33f1437691feaa53da2bb328a576200aa265ae4639f78c7988bf968d6342f006227bc2b49e44a385ccdd28fab3cedaac00630670726c2d3230106170706c69636174696f6e2f6a736f6e00377b2270223a2270726c2d3230222c226f70223a226d696e74222c227469636b223a2270726c73222c22616d74223a22313030303030227d6821c00aa265ae4639f78c7988bf968d6342f006227bc2b49e44a385ccdd28fab3ceda00000000",
+          "txid": "54b0f234d6ca4adf6853bba426005f5529392ba6ea916079a168d478fa9ea051",
+          "vout": [
+            {
+              "value": 0.0005,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "5120749079f3784a1c7898e9961df063a10a371e8bca93a8411834f76da2e8d25f0e",
+                "address": "rprl1pwjg8numcfgw83x8fjcwlqcappgm3az72jw5yzxp57ak696xjtu8qqthvc3"
+              }
+            },
+            {
+              "value": 0.5,
+              "n": 1,
+              "scriptPubKey": {
+                "hex": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+                "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

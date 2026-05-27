@@ -1,0 +1,15 @@
+{
+  "name": "@pearlscriptions/indexer-api",
+  "version": "1.0.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/indexer.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "start": "node src/server.js",
+    "serve": "node src/cli.js serve",
+    "sync": "node src/cli.js sync",
+    "status": "node src/cli.js status",
+    "digest": "node src/cli.js digest"
+  }
+}

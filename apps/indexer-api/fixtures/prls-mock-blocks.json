@@ -1,0 +1,193 @@
+{
+  "network": {
+    "chain": "pearl-mock",
+    "source": "deterministic local fixture",
+    "taprootProof": "mock-witness-envelope-only"
+  },
+  "prlBalances": {
+    "prl1alice": "1.75000000",
+    "prl1bob": "0.25000000",
+    "prl1deployer": "10.00000000"
+  },
+  "utxos": {
+    "prl1alice": [
+      {
+        "txid": "funding-alice",
+        "vout": 0,
+        "valuePrl": "1.75000000",
+        "scriptPubKey": "5120alice"
+      }
+    ]
+  },
+  "blocks": [
+    {
+      "height": 1,
+      "hash": "mock-block-000001",
+      "previousHash": "mock-genesis",
+      "transactions": [
+        {
+          "txid": "tx-deploy-prls",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"deploy\",\"tick\":\"prls\",\"max\":\"2100000000\",\"lim\":\"100000\",\"dec\":\"18\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1deployer",
+              "scriptPubKey": "5120deployer",
+              "valuePrl": "0.00000546"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "height": 2,
+      "hash": "mock-block-000002",
+      "previousHash": "mock-block-000001",
+      "transactions": [
+        {
+          "txid": "tx-mint-alice",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"mint\",\"tick\":\"PRLS\",\"amt\":\"100000\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1alice",
+              "scriptPubKey": "5120alice",
+              "valuePrl": "0.00000546"
+            },
+            {
+              "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68",
+              "scriptPubKey": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+              "valuePrl": "1.00000000"
+            }
+          ]
+        },
+        {
+          "txid": "tx-mint-bob",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"mint\",\"tick\":\"prls\",\"amt\":\"100000\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1bob",
+              "scriptPubKey": "5120bob",
+              "valuePrl": "0.00000546"
+            },
+            {
+              "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68",
+              "scriptPubKey": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+              "valuePrl": "1.00000000"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "height": 3,
+      "hash": "mock-block-000003",
+      "previousHash": "mock-block-000002",
+      "transactions": [
+        {
+          "txid": "tx-duplicate-deploy",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"deploy\",\"tick\":\"prls\",\"max\":\"2100000000\",\"lim\":\"100000\",\"dec\":\"18\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1alice",
+              "scriptPubKey": "5120alice",
+              "valuePrl": "0.00000546"
+            }
+          ]
+        },
+        {
+          "txid": "tx-invalid-over-limit",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"mint\",\"tick\":\"prls\",\"amt\":\"100001\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1alice",
+              "scriptPubKey": "5120alice",
+              "valuePrl": "0.00000546"
+            }
+          ]
+        },
+        {
+          "txid": "tx-malformed-json",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"mint\",\"tick\":\"prls\",\"amt\":\"100000\"",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "prl1alice",
+              "scriptPubKey": "5120alice",
+              "valuePrl": "0.00000546"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

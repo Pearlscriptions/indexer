@@ -1,0 +1,72 @@
+{
+  "network": {
+    "chain": "pearl-simnet",
+    "source": "local pearld simnet commit/reveal proof",
+    "taprootProof": "real-serialized-witness",
+    "proofBlockHash": "1a5c1e370829e17ef8db6d8715f1f976e414c06ad766c912c0866311c78dd3f1"
+  },
+  "blocks": [
+    {
+      "height": 101,
+      "hash": "fixture-preseed-prls-deploy",
+      "previousHash": "simnet-before-proof",
+      "transactions": [
+        {
+          "txid": "fixture-deploy-prls",
+          "inputs": [
+            {
+              "witness": [
+                "OP_FALSE",
+                "OP_IF",
+                "prl-20",
+                "application/json",
+                "0x00",
+                "{\"p\":\"prl-20\",\"op\":\"deploy\",\"tick\":\"prls\",\"max\":\"2100000000\",\"lim\":\"100000\",\"dec\":\"18\"}",
+                "OP_ENDIF"
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "address": "rprl1pn5e3e49hgpmrvy6tx29up06gsmgajqrgg7aslfl9k7d440kjhtss6skc54",
+              "scriptPubKey": "51209d331cd4b7407636134b328bc0bf4886d1d9006847bb0fa7e5b79b5abed2bae1",
+              "valueGrain": 50000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "height": 102,
+      "hash": "1a5c1e370829e17ef8db6d8715f1f976e414c06ad766c912c0866311c78dd3f1",
+      "previousHash": "6ff1f46e2faf3e6c8b6284755d7654f61dec1c23d9e28325d10cb72f82190717",
+      "transactions": [
+        {
+          "txid": "4ce09eb37a2022e586b5a8a1ec764eba49313b9b5f2bc9f05f55541c7e82c9b0",
+          "rawTxHex": "0100000000010156e1be953df27555232a37667fb57453117c2ff8ecd89fd6cefd8ec6bb5bbbcb0000000000ffffffff0150c30000000000002251209d331cd4b7407636134b328bc0bf4886d1d9006847bb0fa7e5b79b5abed2bae1034028b2b869e4678c7d2f680f4db1ed14e76725557a825831eb9d9655d7ae7cebcc5258fcd59d09ac67ec32eab704813eb662eeb9dfb72266b021fb3a1f640b8fdb76202008151c5cf76c1447f82a1acafbd5829d61922c30645d0881d9a385e25ff70aac00630670726c2d3230106170706c69636174696f6e2f6a736f6e00377b2270223a2270726c2d3230222c226f70223a226d696e74222c227469636b223a2270726c73222c22616d74223a22313030303030227d6821c12008151c5cf76c1447f82a1acafbd5829d61922c30645d0881d9a385e25ff70a00000000",
+          "inputs": [
+            {
+              "previousTxid": "cbbb5bbbc68efdced69fd8ecf82f7c115374b57f66372a235575f23d95bee156",
+              "vout": 0
+            }
+          ],
+          "outputs": [
+            {
+              "address": "rprl1pn5e3e49hgpmrvy6tx29up06gsmgajqrgg7aslfl9k7d440kjhtss6skc54",
+              "scriptPubKey": "51209d331cd4b7407636134b328bc0bf4886d1d9006847bb0fa7e5b79b5abed2bae1",
+              "valueGrain": 50000
+            }
+          ],
+          "proof": {
+            "commitTxid": "cbbb5bbbc68efdced69fd8ecf82f7c115374b57f66372a235575f23d95bee156",
+            "wtxid": "5625acce1dbac799b944c9bd23c057c80cc3c340d3a20421fa125c4f3cb7b68d",
+            "testmempoolacceptAllowed": true,
+            "confirmationsObserved": 1,
+            "leafScriptHex": "202008151c5cf76c1447f82a1acafbd5829d61922c30645d0881d9a385e25ff70aac00630670726c2d3230106170706c69636174696f6e2f6a736f6e00377b2270223a2270726c2d3230222c226f70223a226d696e74222c227469636b223a2270726c73222c22616d74223a22313030303030227d68",
+            "controlBlockHex": "c12008151c5cf76c1447f82a1acafbd5829d61922c30645d0881d9a385e25ff70a"
+          }
+        }
+      ]
+    }
+  ]
+}

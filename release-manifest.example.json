@@ -1,0 +1,14 @@
+{
+  "schema": "pearlscriptions-release-manifest-v1",
+  "network": "pearl-mainnet",
+  "protocol": "prl-20-v0",
+  "prls": {
+    "tick": "prls",
+    "max": "2100000000",
+    "lim": "100000",
+    "dec": 18,
+    "mintFeeGrain": "100000000",
+    "mintFeeRecipient": "prl1ppmla838yflfcsm5vr6lfgvfclf4fgn3puja70cke4wqqkl6vflaq3cn7ea",
+    "mintFeeScriptPubKey": "51200effd3c4e44fd3886e8c1ebe943138fa6a944e21e4bbe7e2d9ab800b7f4c4ffa"
+  }
+}

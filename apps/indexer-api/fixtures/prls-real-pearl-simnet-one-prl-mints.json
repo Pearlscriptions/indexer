@@ -1,0 +1,97 @@
+{
+  "network": {
+    "chain": "pearl-simnet",
+    "source": "one-prl-browser-mints",
+    "pearlSourceCommit": "ae79b840a2b678777a1dd396a78944d40ab92f21",
+    "capturedAt": "2026-05-17T22:52:17+02:00"
+  },
+  "proof": {
+    "owner": {
+      "address": "rprl1pnq38jqxwnt9dpreq0uj0p4jfgpyl3n2r9v5rflqkhnnnvt4ayz3sgu45sa",
+      "scriptPubKey": "512098227900ce9acad08f207f24f0d6494049f8cd432b2834fc16bce7362ebd20a3"
+    },
+    "mintFee": {
+      "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68",
+      "scriptPubKey": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+      "valuePrl": "1.00000000"
+    },
+    "confirmedBlock": {
+      "height": 207,
+      "hash": "bb0a2fe815cae93e1cd5af875893213fadbe034b18399d0213a15858a89c06ed"
+    },
+    "liveTokenStateAfterMining": {
+      "mintedSupply": "800000",
+      "mintCount": 8
+    },
+    "operations": [
+      {
+        "name": "mint",
+        "revealTxid": "e23251f2b4e0c3da9512a72d1fb71172d5a6a45a2fa82c0bc4aad14a2f488dd1",
+        "confirmedHeight": 207,
+        "paidMintFeeGrain": "100000000"
+      },
+      {
+        "name": "mint",
+        "revealTxid": "200eed11a81fe39d483e9d38d43b104d2a78fe9f7ee47145f00006176daa905f",
+        "confirmedHeight": 207,
+        "paidMintFeeGrain": "100000000"
+      }
+    ],
+    "notes": [
+      "Pearl simnet mined a block containing valid PRLS mint reveals with paidMintFeeGrain=100000000.",
+      "This fixture keeps two representative 1 PRL fee mints for deterministic parser and state tests."
+    ]
+  },
+  "blocks": [
+    {
+      "height": 207,
+      "hash": "bb0a2fe815cae93e1cd5af875893213fadbe034b18399d0213a15858a89c06ed",
+      "rawtx": [
+        {
+          "hex": "01000000000101fafe4d00eccbd7e1842441fa3caa1c062c46351800f2eeb9e6d140f58aec3a850000000000ffffffff0250c300000000000022512098227900ce9acad08f207f24f0d6494049f8cd432b2834fc16bce7362ebd20a300e1f5050000000022512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef20340459b0b188f6c4cadd4b6f6e7b9113f420917feecef5b709737dd31853ca293af65ba051def41474f5c1b543f7941875ed3ef7c82dc884afe9832227ce4075fa7762050ce0bd6392016567e7cbe5b9ef771bfe151a95d1d300d8d7f9c66aa2e51534eac00630670726c2d3230106170706c69636174696f6e2f6a736f6e00377b2270223a2270726c2d3230222c226f70223a226d696e74222c227469636b223a2270726c73222c22616d74223a22313030303030227d6821c050ce0bd6392016567e7cbe5b9ef771bfe151a95d1d300d8d7f9c66aa2e51534e00000000",
+          "txid": "e23251f2b4e0c3da9512a72d1fb71172d5a6a45a2fa82c0bc4aad14a2f488dd1",
+          "vout": [
+            {
+              "value": 0.0005,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "512098227900ce9acad08f207f24f0d6494049f8cd432b2834fc16bce7362ebd20a3",
+                "address": "rprl1pnq38jqxwnt9dpreq0uj0p4jfgpyl3n2r9v5rflqkhnnnvt4ayz3sgu45sa"
+              }
+            },
+            {
+              "value": 1,
+              "n": 1,
+              "scriptPubKey": {
+                "hex": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+                "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68"
+              }
+            }
+          ]
+        },
+        {
+          "hex": "01000000000101f2bd45c41fef9ad78c98f5fdfeee50b04e3f8618fa4f3972808f7a728f3c6f7b0000000000ffffffff0250c300000000000022512098227900ce9acad08f207f24f0d6494049f8cd432b2834fc16bce7362ebd20a300e1f5050000000022512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef20340fc68b29cad1c7ae13a2400ce988324af3f40cb759268e2ed22e04dc7e37a1e7cecc0e5c1797c268e2a9cd259c0df1c01870b0232c9514cc148323097f6970531762050ce0bd6392016567e7cbe5b9ef771bfe151a95d1d300d8d7f9c66aa2e51534eac00630670726c2d3230106170706c69636174696f6e2f6a736f6e00377b2270223a2270726c2d3230222c226f70223a226d696e74222c227469636b223a2270726c73222c22616d74223a22313030303030227d6821c050ce0bd6392016567e7cbe5b9ef771bfe151a95d1d300d8d7f9c66aa2e51534e00000000",
+          "txid": "200eed11a81fe39d483e9d38d43b104d2a78fe9f7ee47145f00006176daa905f",
+          "vout": [
+            {
+              "value": 0.0005,
+              "n": 0,
+              "scriptPubKey": {
+                "hex": "512098227900ce9acad08f207f24f0d6494049f8cd432b2834fc16bce7362ebd20a3",
+                "address": "rprl1pnq38jqxwnt9dpreq0uj0p4jfgpyl3n2r9v5rflqkhnnnvt4ayz3sgu45sa"
+              }
+            },
+            {
+              "value": 1,
+              "n": 1,
+              "scriptPubKey": {
+                "hex": "512090bafa55925cb426fa51b50305014e5f21160cf20bf6ad53a7eac88458631ef2",
+                "address": "rprl1pjza054vjtj6zd7j3k5ps2q2wtus3vr8jp0m265a8atyggkrrrmeqehah68"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
