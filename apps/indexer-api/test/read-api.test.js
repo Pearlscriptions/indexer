@@ -119,7 +119,7 @@ test("remote operator metadata validation rejects script-like public fields", ()
     readOnly: true,
     configured: true,
     chain: "pearl-simnet",
-    version: "1.1.0",
+    version: "1.1.1",
     endpoints: {
       health: "/health",
       status: "/indexer/status",
@@ -200,7 +200,7 @@ test("public read API exposes health and digest without opening mutation methods
   const health = await invoke(handler, "GET", "/health");
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
-  assert.equal(health.body.version, "1.1.0");
+  assert.equal(health.body.version, "1.1.1");
   assert.equal(health.body.readOnly, true);
   assert.equal(health.body.indexer.mode, "fixture");
   assert.equal(health.body.indexer.storeDir, undefined);
@@ -318,7 +318,7 @@ test("public digest ignores operator-local network telemetry", async () => {
     getStatus: async () => ({ mode: "test" }),
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.1.0"
+    version: "1.1.1"
   });
 
   const response = await invoke(handler, "GET", "/indexer/digest");
@@ -335,6 +335,47 @@ test("public digest ignores operator-local network telemetry", async () => {
   assert.equal(normalized.transactions, undefined);
   assert.equal(normalized.txStatus, undefined);
   assert.equal(normalized.utxos, undefined);
+});
+
+test("public digest can use precomputed published metadata without loading full snapshot", async () => {
+  let snapshotCalls = 0;
+  const indexedHash = "a".repeat(64);
+  const handler = createReadOnlyApi({
+    getSnapshot: async () => {
+      snapshotCalls += 1;
+      throw new Error("full snapshot should not be loaded");
+    },
+    getStatus: async () => ({ mode: "test" }),
+    storage: {
+      async readSnapshotNetworkMetadata() {
+        return {
+          chain: "pearl-mainnet",
+          indexedHeight: 63124,
+          indexedHash,
+          protocolSnapshotDigest: "c".repeat(64),
+          protocolSummary: {
+            chain: "pearl-mainnet",
+            indexedHeight: 63124,
+            indexedHash,
+            mintCount: 21000
+          }
+        };
+      }
+    },
+    chain: "pearl-mainnet",
+    manifestDigest: "b".repeat(64),
+    version: "1.1.1"
+  });
+
+  const response = await invoke(handler, "GET", "/indexer/digest");
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(response.body.indexedHeight, 63124);
+  assert.equal(response.body.indexedHash, indexedHash);
+  assert.equal(response.body.snapshotDigest, "c".repeat(64));
+  assert.equal(response.body.summary.mintCount, 21000);
+  assert.equal(snapshotCalls, 0);
 });
 
 test("operator metadata routes expose configured safe metadata", async () => {
@@ -367,7 +408,7 @@ test("operator metadata routes expose configured safe metadata", async () => {
   assert.equal(operator.body.schema, "pearlscriptions-indexer-operator-v1");
   assert.equal(operator.body.readOnly, true);
   assert.equal(operator.body.configured, true);
-  assert.equal(operator.body.version, "1.1.0");
+  assert.equal(operator.body.version, "1.1.1");
   assert.deepEqual(operator.body.endpoints, {
     health: "/health",
     status: "/indexer/status",
@@ -453,7 +494,8 @@ test("registry check command passes in local fixture mode", () => {
       ["/health", true],
       ["/indexer/status", true],
       ["/indexer/digest", true],
-      ["/operator", true]
+      ["/operator", true],
+      ["/.well-known/pearlscriptions-indexer.json", true]
     ]
   );
 });

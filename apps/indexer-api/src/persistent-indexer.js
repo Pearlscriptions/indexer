@@ -1,4 +1,9 @@
 import { ingestPearlBlocksFixture, PRLS_MINT_FEE_POLICY } from "./indexer.js";
+import {
+  normalizeProtocolSnapshotForComparison,
+  snapshotDigest,
+  summarizeSnapshot
+} from "./snapshot-compare.js";
 import { assertHash, blockFileName, createIndexerStorage } from "./storage.js";
 
 const SCHEMA_VERSION = 1;
@@ -40,16 +45,27 @@ export class PersistentPrl20Indexer {
 
   async status() {
     await this.load();
+    const publishedSnapshot = await this.readPublishedSnapshotForStatus();
+    if (publishedSnapshot) {
+      return this.buildStatusFromSnapshot(publishedSnapshot, null);
+    }
     return this.buildStatus(null);
   }
 
   async syncToTip() {
     if (!this.syncPromise) {
-      this.syncPromise = this.syncToTipUnsafe().finally(() => {
+      this.syncPromise = this.withStorageSyncLock(() => this.syncToTipUnsafe()).finally(() => {
         this.syncPromise = null;
       });
     }
     return this.syncPromise;
+  }
+
+  async withStorageSyncLock(callback) {
+    if (typeof this.storage.withSyncLock === "function") {
+      return this.storage.withSyncLock(`prl20-indexer:${this.storage.manifestName ?? this.chain}`, callback);
+    }
+    return callback();
   }
 
   async syncToTipUnsafe() {
@@ -64,14 +80,22 @@ export class PersistentPrl20Indexer {
 
     if (!rollbackChanged && !appendChanged && this.canUseStoredSnapshotFastPath(bestHeight)) {
       const snapshot = await this.storage.readSnapshot();
-      if (snapshot) {
+      if (snapshot && snapshotMatchesManifest(snapshot, this.manifest)) {
+        const refreshedSnapshot = this.refreshSnapshotNetwork(snapshot, bestHeight);
+        if (snapshotNetworkChanged(snapshot, refreshedSnapshot)) {
+          if (typeof this.storage.writeSnapshotNetworkMetadata === "function") {
+            await this.storage.writeSnapshotNetworkMetadata(refreshedSnapshot);
+          } else {
+            await this.storage.writeSnapshot(refreshedSnapshot);
+          }
+        }
         return {
           bestHeight,
           startHeight: this.manifest.startHeight,
           indexedHeight: this.manifest.indexedHeight,
           indexedHash: this.manifest.indexedHash,
           blocks: [],
-          snapshot: this.refreshSnapshotNetwork(snapshot, bestHeight),
+          snapshot: refreshedSnapshot,
           status: this.buildStatus(bestHeight)
         };
       }
@@ -213,7 +237,7 @@ export class PersistentPrl20Indexer {
       backend: "custom",
       productionReady: false
     };
-    return ingestPearlBlocksFixture(
+    return withPublishedSnapshotMetadata(ingestPearlBlocksFixture(
       {
         network: {
           chain: this.manifest.chain,
@@ -238,7 +262,7 @@ export class PersistentPrl20Indexer {
         blocks
       },
       { mintFeePolicy: this.mintFeePolicy }
-    );
+    ));
   }
 
   buildStatus(bestHeight) {
@@ -264,6 +288,45 @@ export class PersistentPrl20Indexer {
     };
   }
 
+  async readPublishedSnapshotForStatus() {
+    const storageStatus = this.storage.publicStatus?.() ?? {};
+    if (storageStatus.backend !== "postgres" || storageStatus.readModels !== true) {
+      return null;
+    }
+    const network =
+      typeof this.storage.readSnapshotNetworkMetadata === "function"
+        ? await this.storage.readSnapshotNetworkMetadata()
+        : (await this.storage.readSnapshot())?.network;
+    if (!snapshotNetworkMatchesManifest(network, this.manifest)) {
+      return null;
+    }
+    return { network };
+  }
+
+  buildStatusFromSnapshot(snapshot, bestHeight) {
+    const network = snapshot.network ?? {};
+    const indexedHeight = network.indexedHeight ?? this.manifest.indexedHeight;
+    return {
+      enabled: true,
+      mode: "persistent",
+      schemaVersion: this.manifest.schemaVersion,
+      chain: network.chain ?? this.manifest.chain,
+      storeDir: this.storeDir,
+      startHeight: network.startHeight ?? this.manifest.startHeight,
+      indexedHeight,
+      indexedHash: network.indexedHash ?? this.manifest.indexedHash,
+      bestHeight,
+      synced: bestHeight === null ? null : indexedHeight === bestHeight,
+      blocksStored: network.blocksStored ?? this.manifest.blocks.length,
+      reorgCount: network.reorgCount ?? this.manifest.reorgCount,
+      storage: this.storage.publicStatus?.() ?? {
+        backend: "custom",
+        productionReady: false
+      },
+      lastSyncedAt: network.lastSyncedAt ?? this.manifest.lastSyncedAt
+    };
+  }
+
   async persistManifest() {
     await this.storage.writeManifest(this.manifest);
   }
@@ -279,7 +342,7 @@ export class PersistentPrl20Indexer {
   }
 
   refreshSnapshotNetwork(snapshot, bestHeight) {
-    return {
+    return withPublishedSnapshotMetadata({
       ...snapshot,
       network: {
         ...(snapshot.network ?? {}),
@@ -293,7 +356,7 @@ export class PersistentPrl20Indexer {
         lastSyncedAt: this.manifest.lastSyncedAt,
         persistenceReady: true
       }
-    };
+    });
   }
 }
 
@@ -389,4 +452,63 @@ function validateManifestContinuity(manifest) {
   } else if (manifest.indexedHeight !== null || manifest.indexedHash !== null) {
     throw new Error("invalid PRL-20 indexer manifest: empty block list has an indexed tip");
   }
+}
+
+function withPublishedSnapshotMetadata(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return snapshot;
+  }
+  const normalized = normalizeProtocolSnapshotForComparison(snapshot);
+  return {
+    ...snapshot,
+    network: {
+      ...(snapshot.network ?? {}),
+      protocolSnapshotDigest: snapshotDigest(normalized),
+      protocolSummary: summarizeSnapshot(normalized)
+    }
+  };
+}
+
+function snapshotMatchesManifest(snapshot, manifest) {
+  return (
+    snapshotNetworkMatchesManifest(snapshot?.network, manifest) &&
+    Number(snapshot.network.indexedHeight) === manifest.indexedHeight &&
+    snapshot.network.indexedHash === manifest.indexedHash
+  );
+}
+
+function snapshotNetworkMatchesManifest(network, manifest) {
+  if (!network || network.indexedHeight === undefined || !network.indexedHash) {
+    return false;
+  }
+  if (network.chain && network.chain !== manifest.chain) {
+    return false;
+  }
+  if (network.startHeight !== undefined && network.startHeight !== manifest.startHeight) {
+    return false;
+  }
+  const indexedHeight = Number(network.indexedHeight);
+  if (!Number.isSafeInteger(indexedHeight) || indexedHeight < manifest.startHeight) {
+    return false;
+  }
+  const block = manifest.blocks[indexedHeight - manifest.startHeight];
+  return Boolean(block && block.height === indexedHeight && block.hash === network.indexedHash);
+}
+
+function snapshotNetworkChanged(left, right) {
+  const leftNetwork = left?.network ?? {};
+  const rightNetwork = right?.network ?? {};
+  return (
+    leftNetwork.chain !== rightNetwork.chain ||
+    leftNetwork.bestHeight !== rightNetwork.bestHeight ||
+    leftNetwork.startHeight !== rightNetwork.startHeight ||
+    leftNetwork.indexedHeight !== rightNetwork.indexedHeight ||
+    leftNetwork.indexedHash !== rightNetwork.indexedHash ||
+    leftNetwork.blocksStored !== rightNetwork.blocksStored ||
+    leftNetwork.reorgCount !== rightNetwork.reorgCount ||
+    leftNetwork.lastSyncedAt !== rightNetwork.lastSyncedAt ||
+    leftNetwork.persistenceReady !== rightNetwork.persistenceReady ||
+    leftNetwork.protocolSnapshotDigest !== rightNetwork.protocolSnapshotDigest ||
+    JSON.stringify(leftNetwork.protocolSummary ?? null) !== JSON.stringify(rightNetwork.protocolSummary ?? null)
+  );
 }

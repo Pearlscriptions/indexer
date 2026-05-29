@@ -105,7 +105,11 @@ export async function startServer(config = loadPublicIndexerConfig(), options = 
   let syncTimer = null;
   if (runtime.indexer && config.backgroundSyncMs > 0) {
     syncTimer = setInterval(() => {
-      runtime.indexer.syncToTip().catch(() => {});
+      runtime.indexer.syncToTip().catch((error) => {
+        process.stderr.write(
+          `[pearlscriptions-indexer] background sync failed: ${safeErrorMessage(error)}\n`
+        );
+      });
     }, config.backgroundSyncMs);
   }
 
@@ -125,6 +129,10 @@ export async function startServer(config = loadPublicIndexerConfig(), options = 
       });
     }
   };
+}
+
+function safeErrorMessage(error) {
+  return String(error?.message ?? error ?? "unknown error").replace(/postgres:\/\/[^@\s]+@/gi, "postgres://<redacted>@");
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

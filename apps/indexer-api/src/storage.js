@@ -8,6 +8,7 @@ export const INDEXER_STORAGE_BACKENDS = {
 
 const MANIFEST_FILE = "manifest.json";
 const SNAPSHOT_FILE = "snapshot.json";
+const READ_MODEL_INSERT_CHUNK_SIZE = 500;
 
 export function createIndexerStorage(options = {}) {
   const backend = normalizeStorageBackend(options.backend ?? "json-file");
@@ -86,6 +87,11 @@ export class JsonFileIndexerStorage {
       }
       throw error;
     });
+  }
+
+  async readSnapshotNetworkMetadata() {
+    const snapshot = await this.readSnapshot();
+    return snapshot?.network ?? null;
   }
 
   publicStatus() {
@@ -247,12 +253,40 @@ export class PostgresIndexerStorage {
     });
   }
 
+  async writeSnapshotNetworkMetadata(snapshot) {
+    const storedSnapshot = compactSnapshotForStorage(snapshot);
+    const networkJson = JSON.stringify(storedSnapshot?.network ?? {});
+    const result = await this.query(
+      `UPDATE indexer_snapshots
+          SET snapshot_json = snapshot_json || jsonb_build_object('network', $2::jsonb),
+              updated_at = now()
+        WHERE name = $1`,
+      [this.manifestName, networkJson]
+    );
+    if (result.rowCount === 0) {
+      await this.query(
+        `INSERT INTO indexer_snapshots (name, snapshot_json, updated_at)
+         VALUES ($1, $2::jsonb, now())
+         ON CONFLICT (name) DO NOTHING`,
+        [this.manifestName, JSON.stringify(storedSnapshot)]
+      );
+    }
+  }
+
   async readSnapshot() {
     const result = await this.query(
       "SELECT snapshot_json FROM indexer_snapshots WHERE name = $1",
       [this.manifestName]
     );
     return result.rows.length === 0 ? null : normalizeJsonObject(result.rows[0].snapshot_json);
+  }
+
+  async readSnapshotNetworkMetadata() {
+    const result = await this.query(
+      "SELECT snapshot_json -> 'network' AS network_json FROM indexer_snapshots WHERE name = $1",
+      [this.manifestName]
+    );
+    return result.rows.length === 0 ? null : normalizeJsonObject(result.rows[0].network_json);
   }
 
   async listInscriptionsPage(searchParams = new URLSearchParams()) {
@@ -409,6 +443,32 @@ export class PostgresIndexerStorage {
       throw error;
     } finally {
       release?.();
+    }
+  }
+
+  async withSyncLock(lockName, callback) {
+    const pool = await this.getPool();
+    if (typeof pool.connect !== "function") {
+      return callback();
+    }
+    const client = await pool.connect();
+    let locked = false;
+    try {
+      const result = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS locked", [
+        lockName
+      ]);
+      locked = result.rows[0]?.locked === true;
+      if (!locked) {
+        const error = new Error("another PRL-20 indexer sync is already running");
+        error.code = "SYNC_LOCK_BUSY";
+        throw error;
+      }
+      return await callback();
+    } finally {
+      if (locked) {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockName]).catch(() => {});
+      }
+      client.release();
     }
   }
 }
@@ -602,10 +662,11 @@ async function materializeReadModelTable({ client, manifestName, table, rows }) 
   if (rows.length === 0) {
     return;
   }
-  const json = JSON.stringify(rows);
-  if (table === "indexer_read_inscriptions") {
-    await client.query(
-      `INSERT INTO indexer_read_inscriptions (
+  for (let offset = 0; offset < rows.length; offset += READ_MODEL_INSERT_CHUNK_SIZE) {
+    const json = JSON.stringify(rows.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE));
+    if (table === "indexer_read_inscriptions") {
+      await client.query(
+        `INSERT INTO indexer_read_inscriptions (
           manifest_name, inscription_id, inscription_number, current_owner_address,
           current_owner_script_pubkey, record_json, updated_at
        )
@@ -618,13 +679,13 @@ async function materializeReadModelTable({ client, manifestName, table, rows }) 
               current_owner_script_pubkey TEXT,
               record_json JSONB
             )`,
-      [manifestName, json]
-    );
-    return;
-  }
-  if (table === "indexer_read_utxos") {
-    await client.query(
-      `INSERT INTO indexer_read_utxos (
+        [manifestName, json]
+      );
+      continue;
+    }
+    if (table === "indexer_read_utxos") {
+      await client.query(
+        `INSERT INTO indexer_read_utxos (
           manifest_name, outpoint, txid, vout, address, script_pubkey, value_grain,
           block_height, confirmations, coinbase, spendable, protected,
           protection_reason, inscription_id, inscription_number, transfer_lot_id,
@@ -652,8 +713,9 @@ async function materializeReadModelTable({ client, manifestName, table, rows }) 
               transfer_lot_id TEXT,
               record_json JSONB
             )`,
-      [manifestName, json]
-    );
+        [manifestName, json]
+      );
+    }
   }
 }
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.1 - 2026-05-29
+
+Operator registry hardening release.
+
+What changed:
+
+- Made `/indexer/digest` registry-critical and served it with `no-store`
+  semantics.
+- Added published snapshot digest metadata so `/indexer/digest` can avoid
+  hashing the full snapshot on every registry check.
+- Made Postgres-backed status follow the published snapshot/read model, reducing
+  transient status/digest mismatches during background sync.
+- Added stricter fast-path validation so stale snapshots are rebuilt instead of
+  being retagged to a newer manifest tip.
+- Added narrow Postgres metadata-only snapshot updates and a sync advisory lock
+  to reduce concurrent writer races.
+- Hardened `registry:check` with well-known proof validation, anti-cache remote
+  checks, and stricter status/digest/operator metadata comparisons.
+
+Security boundary:
+
+This release stays read-only and does not add wallet signing, transaction
+broadcast, marketplace settlement, registry backend mutation, or rewards logic.
+
 ## v1.1.0 - 2026-05-29
 
 Operator registry compatibility release.

@@ -69,6 +69,10 @@ export function createReadOnlyApi({
       }
 
       if (url.pathname === "/indexer/digest") {
+        const publishedDigest = await readPublishedDigest(storage, { chain, manifestDigest });
+        if (publishedDigest) {
+          return sendJson(response, 200, publishedDigest, cacheHeaders("live"));
+        }
         const snapshot = await getSnapshot();
         const normalized = normalizeProtocolSnapshotForComparison(snapshot);
         return sendJson(response, 200, {
@@ -78,7 +82,7 @@ export function createReadOnlyApi({
           snapshotDigest: snapshotDigest(normalized),
           releaseManifestDigest: manifestDigest,
           summary: summarizeSnapshot(normalized)
-        }, cacheHeaders("short"));
+        }, cacheHeaders("live"));
       }
 
       if (url.pathname === "/operator" || url.pathname === "/.well-known/pearlscriptions-indexer.json") {
@@ -128,6 +132,25 @@ async function routeReadModel(storage, url) {
   }
   return null;
 }
+
+async function readPublishedDigest(storage, { chain, manifestDigest }) {
+  if (!storage || typeof storage.readSnapshotNetworkMetadata !== "function") {
+    return null;
+  }
+  const network = await storage.readSnapshotNetworkMetadata();
+  if (!network?.protocolSnapshotDigest || !network?.protocolSummary) {
+    return null;
+  }
+  return {
+    chain: network.chain ?? chain,
+    indexedHeight: network.indexedHeight ?? null,
+    indexedHash: network.indexedHash ?? null,
+    snapshotDigest: network.protocolSnapshotDigest,
+    releaseManifestDigest: manifestDigest,
+    summary: network.protocolSummary
+  };
+}
+
 
 function sanitizeStatus(status) {
   const cleaned = structuredClone(status ?? {});

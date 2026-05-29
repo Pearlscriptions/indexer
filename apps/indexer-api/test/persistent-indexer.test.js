@@ -255,6 +255,98 @@ test("postgres persistent indexer reuses stored snapshots when already synced", 
     pool.queries.some((query) => query.startsWith("SELECT raw_json FROM chain_blocks")),
     false
   );
+  assert.match(pool.snapshots.get("fast-path-test").network.protocolSnapshotDigest, /^[0-9a-f]{64}$/);
+});
+
+test("postgres persistent indexer rebuilds instead of retagging stale snapshots", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "stale-snapshot-test" });
+  const firstBlock = block(1, hash("a1"), null, []);
+  const secondBlock = block(2, hash("a2"), firstBlock.hash, []);
+
+  await storage.init();
+  await storage.writeManifest({
+    schemaVersion: 1,
+    chain: "pearl-simnet",
+    startHeight: 1,
+    indexedHeight: 2,
+    indexedHash: secondBlock.hash,
+    blocks: [
+      {
+        height: 1,
+        hash: firstBlock.hash,
+        previousHash: null,
+        time: null,
+        txCount: 0,
+        file: `pg:1:${firstBlock.hash}`
+      },
+      {
+        height: 2,
+        hash: secondBlock.hash,
+        previousHash: firstBlock.hash,
+        time: null,
+        txCount: 0,
+        file: `pg:2:${secondBlock.hash}`
+      }
+    ],
+    reorgCount: 0,
+    createdAt: "2026-05-18T00:00:00.000Z",
+    lastSyncedAt: "2026-05-18T00:02:00.000Z"
+  });
+  await storage.writeBlock({ height: 1, hash: firstBlock.hash, block: firstBlock });
+  await storage.writeBlock({ height: 2, hash: secondBlock.hash, block: secondBlock });
+  await storage.writeSnapshot({
+    network: {
+      chain: "pearl-simnet",
+      startHeight: 1,
+      indexedHeight: 1,
+      indexedHash: firstBlock.hash
+    },
+    inscriptions: [],
+    utxos: {}
+  });
+
+  pool.queries = [];
+  const indexer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock, secondBlock]),
+    storage,
+    chain: "pearl-simnet",
+    startHeight: 1
+  });
+
+  const result = await indexer.syncToTip();
+
+  assert.equal(result.snapshot.network.indexedHeight, 2);
+  assert.equal(pool.snapshots.get("stale-snapshot-test").network.indexedHash, secondBlock.hash);
+  assert.ok(pool.queries.some((query) => query.startsWith("SELECT raw_json FROM chain_blocks")));
+});
+
+test("postgres storage metadata refresh only updates snapshot network", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "metadata-refresh-test" });
+  await storage.init();
+  await storage.writeSnapshot({
+    network: { chain: "pearl-simnet", indexedHeight: 1, indexedHash: hash("b1") },
+    inscriptions: [readInscription("inscription-stays", 1, "prl1alice")],
+    utxos: {}
+  });
+
+  await storage.writeSnapshotNetworkMetadata({
+    network: {
+      chain: "pearl-simnet",
+      indexedHeight: 2,
+      indexedHash: hash("b2"),
+      protocolSnapshotDigest: "c".repeat(64),
+      protocolSummary: { chain: "pearl-simnet", indexedHeight: 2 }
+    },
+    inscriptions: []
+  });
+
+  const stored = pool.snapshots.get("metadata-refresh-test");
+  assert.equal(stored.network.indexedHeight, 2);
+  assert.equal(stored.inscriptions.length, 1);
+  assert.equal(stored.inscriptions[0].id, "inscription-stays");
+  assert.deepEqual(await storage.readSnapshotNetworkMetadata(), stored.network);
 });
 
 test("snapshot comparison ignores volatile runtime metadata but catches derived-state drift", () => {
@@ -341,6 +433,85 @@ test("postgres storage materializes paginated inscription and UTXO read models",
     ["alice-funding:0", "alice-inscription:0"]
   );
   assert.equal(aliceUtxos.utxos[1].protectionReason, "INSCRIPTION_UTXO");
+});
+
+test("postgres storage chunks read-model inserts to stay under jsonb parameter limits", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "chunked-read-model-test" });
+  await storage.init();
+
+  const inscriptions = Array.from({ length: 1201 }, (_, index) =>
+    readInscription(`inscription-${index}`, index, "prl1alice")
+  );
+
+  await storage.writeSnapshot({ inscriptions, utxos: {} });
+
+  const insertQueries = pool.queries.filter((query) =>
+    query.startsWith("INSERT INTO indexer_read_inscriptions")
+  );
+  assert.equal(insertQueries.length, 3);
+  assert.equal(pool.readInscriptions.length, 1201);
+});
+
+test("postgres status follows the published snapshot while manifest is ahead", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "published-status-test" });
+  const firstBlock = block(1, hash("91"), null, []);
+  const secondBlock = block(2, hash("92"), firstBlock.hash, []);
+
+  await storage.init();
+  await storage.writeManifest({
+    schemaVersion: 1,
+    chain: "pearl-simnet",
+    startHeight: 1,
+    indexedHeight: 2,
+    indexedHash: secondBlock.hash,
+    blocks: [
+      {
+        height: 1,
+        hash: firstBlock.hash,
+        previousHash: null,
+        time: null,
+        txCount: 0,
+        file: `pg:1:${firstBlock.hash}`
+      },
+      {
+        height: 2,
+        hash: secondBlock.hash,
+        previousHash: firstBlock.hash,
+        time: null,
+        txCount: 0,
+        file: `pg:2:${secondBlock.hash}`
+      }
+    ],
+    reorgCount: 0,
+    createdAt: "2026-05-18T00:00:00.000Z",
+    lastSyncedAt: "2026-05-18T00:02:00.000Z"
+  });
+  await storage.writeSnapshot({
+    network: {
+      chain: "pearl-simnet",
+      startHeight: 1,
+      indexedHeight: 1,
+      indexedHash: firstBlock.hash,
+      blocksStored: 1,
+      reorgCount: 0,
+      lastSyncedAt: "2026-05-18T00:01:00.000Z"
+    }
+  });
+
+  const indexer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock, secondBlock]),
+    storage,
+    chain: "pearl-simnet",
+    startHeight: 1
+  });
+
+  const status = await indexer.status();
+
+  assert.equal(status.indexedHeight, 1);
+  assert.equal(status.indexedHash, firstBlock.hash);
+  assert.equal(status.blocksStored, 1);
 });
 
 test("persistent indexer fails closed when a stored block file is missing", async () => {
@@ -813,8 +984,26 @@ class FakePgPool {
     }
     if (compact.startsWith("INSERT INTO indexer_snapshots")) {
       const [name, snapshotJson] = params;
-      this.snapshots.set(name, JSON.parse(snapshotJson));
+      if (!compact.includes("DO NOTHING") || !this.snapshots.has(name)) {
+        this.snapshots.set(name, JSON.parse(snapshotJson));
+      }
       return { rows: [] };
+    }
+    if (compact.startsWith("UPDATE indexer_snapshots SET snapshot_json")) {
+      const [name, networkJson] = params;
+      const snapshot = this.snapshots.get(name);
+      if (!snapshot) {
+        return { rows: [], rowCount: 0 };
+      }
+      this.snapshots.set(name, {
+        ...snapshot,
+        network: JSON.parse(networkJson)
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    if (compact.startsWith("SELECT snapshot_json -> 'network'")) {
+      const snapshot = this.snapshots.get(params[0]);
+      return { rows: snapshot ? [{ network_json: snapshot.network ?? null }] : [] };
     }
     if (compact.startsWith("SELECT snapshot_json FROM indexer_snapshots")) {
       const snapshot = this.snapshots.get(params[0]);

@@ -11,7 +11,13 @@ import {
 import { createPublicIndexerRuntime, startServer } from "./server.js";
 
 const command = process.argv[2] ?? "help";
-const REGISTRY_CHECK_PATHS = ["/health", "/indexer/status", "/indexer/digest", "/operator"];
+const REGISTRY_CHECK_PATHS = [
+  "/health",
+  "/indexer/status",
+  "/indexer/digest",
+  "/operator",
+  "/.well-known/pearlscriptions-indexer.json"
+];
 
 try {
   if (command === "serve") {
@@ -90,7 +96,7 @@ async function registryCheck(config, options) {
   if (options.url) {
     const remote = await checkRemoteRegistryTarget(options.url);
     checks.push(...remote.checks);
-    readiness = buildRegistryReadiness(remote.results, config);
+    readiness = buildRegistryReadiness(remote.results, config, options.url);
     return summarizeRegistryCheck("remote", options.url, checks, warnings, readiness);
   }
 
@@ -122,8 +128,11 @@ async function checkRemoteRegistryTarget(rawUrl) {
   const baseUrl = normalizeSelfCheckUrl(rawUrl);
   const checks = [];
   const results = new Map();
-  for (const path of REGISTRY_CHECK_PATHS) {
-    const result = await fetchJsonWithLimit(new URL(path, baseUrl));
+  for (let index = 0; index < REGISTRY_CHECK_PATHS.length; index += 1) {
+    const path = REGISTRY_CHECK_PATHS[index];
+    const url = new URL(path, baseUrl);
+    url.searchParams.set("_prlRegistryCheck", `${Date.now()}-${index}`);
+    const result = await fetchJsonWithLimit(url);
     results.set(path, result);
     checks.push(validateRegistryPath(path, result));
   }
@@ -157,7 +166,7 @@ function validateRegistryPath(path, result) {
       check.errors.push("DIGEST_RELEASE_MANIFEST_DIGEST_INVALID");
     }
   }
-  if (path === "/operator") {
+  if (path === "/operator" || path === "/.well-known/pearlscriptions-indexer.json") {
     check.errors.push(...validateOperatorMetadataDocument(result.body));
   }
   check.ok = check.errors.length === 0;
@@ -175,11 +184,12 @@ function summarizeRegistryCheck(mode, targetUrl, checks, warnings, readiness = n
   };
 }
 
-function buildRegistryReadiness(results, config) {
+function buildRegistryReadiness(results, config, targetUrl = null) {
   const health = results.get("/health")?.body ?? null;
   const status = results.get("/indexer/status")?.body ?? null;
   const digest = results.get("/indexer/digest")?.body ?? null;
   const operator = results.get("/operator")?.body ?? null;
+  const wellKnown = results.get("/.well-known/pearlscriptions-indexer.json")?.body ?? null;
   const errors = [];
 
   const endpointOk = REGISTRY_CHECK_PATHS.every((path) => results.get(path)?.status === 200 && !results.get(path)?.error);
@@ -188,6 +198,7 @@ function buildRegistryReadiness(results, config) {
   const operatorPublicUrl = operator?.operator?.publicUrl ?? null;
   const rewardAddress = operator?.operator?.rewardAddress ?? null;
   const challenge = operator?.registry?.challenge ?? null;
+  const targetOrigin = targetUrl ? normalizeSelfCheckUrl(targetUrl).origin : null;
 
   if (!operatorPublicUrl) {
     errors.push("OPERATOR_PUBLIC_URL_MISSING");
@@ -197,6 +208,21 @@ function buildRegistryReadiness(results, config) {
   }
   if (!challenge) {
     errors.push("OPERATOR_REGISTRY_CHALLENGE_MISSING");
+  }
+  if (targetOrigin && operatorPublicUrl && operatorPublicUrl !== targetOrigin) {
+    errors.push("OPERATOR_PUBLIC_URL_TARGET_MISMATCH");
+  }
+  if (config.operator.publicUrl && operatorPublicUrl && config.operator.publicUrl !== operatorPublicUrl) {
+    errors.push("OPERATOR_PUBLIC_URL_CONFIG_MISMATCH");
+  }
+  if (config.operator.rewardAddress && rewardAddress && config.operator.rewardAddress !== rewardAddress) {
+    errors.push("OPERATOR_REWARD_ADDRESS_MISMATCH");
+  }
+  if (config.operator.registryChallenge && challenge && config.operator.registryChallenge !== challenge) {
+    errors.push("OPERATOR_REGISTRY_CHALLENGE_MISMATCH");
+  }
+  if (wellKnown && JSON.stringify(wellKnown) !== JSON.stringify(operator)) {
+    errors.push("OPERATOR_WELL_KNOWN_MISMATCH");
   }
 
   const statusHeight = numberOrNull(status?.indexedHeight);
@@ -222,8 +248,24 @@ function buildRegistryReadiness(results, config) {
   if (statusHash && digestHash && statusHash !== digestHash) {
     errors.push("STATUS_DIGEST_HASH_MISMATCH");
   }
+  if (!fixtureMode) {
+    if (statusHeight === null) errors.push("STATUS_HEIGHT_MISSING");
+    if (digestHeight === null) errors.push("DIGEST_HEIGHT_MISSING");
+    if (!statusHash) errors.push("STATUS_HASH_MISSING");
+    if (!digestHash) errors.push("DIGEST_HASH_MISSING");
+    if (!statusChain) errors.push("STATUS_CHAIN_MISSING");
+    if (!digestChain) errors.push("DIGEST_CHAIN_MISSING");
+  }
   if (config.manifestDigest && digest?.releaseManifestDigest && digest.releaseManifestDigest !== config.manifestDigest) {
     errors.push("RELEASE_MANIFEST_DIGEST_MISMATCH");
+  }
+  const digestMatchesStatus =
+    statusHeight !== null &&
+    digestHeight !== null &&
+    statusHeight === digestHeight &&
+    (!statusHash || !digestHash || statusHash === digestHash);
+  if (!fixtureMode && !digestMatchesStatus) {
+    errors.push("STATUS_DIGEST_NOT_MATCHING");
   }
 
   return {
@@ -237,11 +279,7 @@ function buildRegistryReadiness(results, config) {
     statusHeight,
     digestHeight,
     synced: status?.synced ?? null,
-    digestMatchesStatus:
-      statusHeight !== null &&
-      digestHeight !== null &&
-      statusHeight === digestHeight &&
-      (!statusHash || !digestHash || statusHash === digestHash),
+    digestMatchesStatus,
     errors
   };
 }
@@ -275,7 +313,12 @@ async function fetchJsonWithLimit(url) {
     const response = await fetch(url, {
       method: "GET",
       signal: controller.signal,
-      headers: { accept: "application/json" }
+      headers: {
+        accept: "application/json",
+        "cache-control": "no-cache",
+        pragma: "no-cache",
+        "x-pearlscriptions-registry-check": "1"
+      }
     });
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > 512 * 1024) {

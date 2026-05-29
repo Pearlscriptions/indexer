@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <code>v1.1.0</code>
+  <code>v1.1.1</code>
   ·
   <code>node >=22</code>
   ·
@@ -36,7 +36,7 @@
 
 <p align="center">
   Run your own Pearl-backed indexer, reproduce canonical inscription numbers,
-  derive PRL-20 state, and compare deterministic digests with other v1.1.0
+  derive PRL-20 state, and compare deterministic digests with other v1.1.1
   operators.
 </p>
 
@@ -51,10 +51,14 @@ trading APIs.
 The official Pearlscriptions marketplace is an application layer built on top of
 transfer lots. It is not part of this public indexer release.
 
-The `v1.1.0` release keeps the public indexer read-only and adds optional
+The `v1.1.1` release keeps the public indexer read-only and adds optional
 operator metadata for the Pearlscriptions operator registry. Registration,
 monitoring, scoring, and rewards remain official application-layer services
 outside this repository.
+
+This patch release hardens operator registry checks by serving digest metadata
+from the published snapshot, using live no-store headers for registry-critical
+state, and making Postgres snapshot updates safer under background sync.
 
 <table>
   <tr>
@@ -246,6 +250,7 @@ Do not commit `.env`.
 | --- | --- |
 | [Operator guide](docs/operators.md) | Runbook for syncing, serving, and monitoring an indexer. |
 | [Operator registry v1.1 plan](docs/operator-registry-v1.1-plan.md) | Future registry architecture, proofs, checks, and reward-eligibility planning. |
+| [Operator registry hardening audit](docs/operator-registry-hardening-audit-2026-05-29.md) | Notes on the v1.1.1 digest/status hardening pass. |
 | [Configuration reference](docs/configuration.md) | Environment variables and runtime defaults. |
 | [API contract](docs/api-contract.md) | Public read API shape and response rules. |
 | [Architecture](docs/architecture.md) | Repository structure and indexer boundaries. |
