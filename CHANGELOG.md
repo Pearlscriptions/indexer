@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.1.2 - 2026-05-29
+
+Operator worker split hardening release.
+
+What changed:
+
+- Refreshed persistent status reads from durable storage so operators can run
+  a public read API process separately from a private sync worker without
+  serving stale height/status after the worker advances.
+- Added an operator worker split runbook documenting the recommended public API
+  and private sync worker deployment shape.
+- Added coverage for status refreshes after an external sync worker advances
+  the shared Postgres manifest.
+
+Security boundary:
+
+This release keeps the public indexer read-only and does not add wallet signing,
+transaction broadcast, marketplace settlement, registry backend mutation, or
+rewards logic.
+
 ## v1.1.1 - 2026-05-29
 
 Operator registry hardening release.
@@ -18,9 +38,6 @@ What changed:
   to reduce concurrent writer races.
 - Hardened `registry:check` with well-known proof validation, anti-cache remote
   checks, and stricter status/digest/operator metadata comparisons.
-- Refreshed persistent status reads from durable storage so operators can run
-  a public read API process separately from a private sync worker without
-  serving stale height/status after the worker advances.
 
 Security boundary:
 

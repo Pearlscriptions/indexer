@@ -1,6 +1,6 @@
 {
   "name": "pearlscriptions-indexer",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "Read-only Pearlscriptions and PRL-20 indexer for Pearl.",
   "license": "MIT",

@@ -119,7 +119,7 @@ test("remote operator metadata validation rejects script-like public fields", ()
     readOnly: true,
     configured: true,
     chain: "pearl-simnet",
-    version: "1.1.1",
+    version: "1.1.2",
     endpoints: {
       health: "/health",
       status: "/indexer/status",
@@ -200,7 +200,7 @@ test("public read API exposes health and digest without opening mutation methods
   const health = await invoke(handler, "GET", "/health");
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
-  assert.equal(health.body.version, "1.1.1");
+  assert.equal(health.body.version, "1.1.2");
   assert.equal(health.body.readOnly, true);
   assert.equal(health.body.indexer.mode, "fixture");
   assert.equal(health.body.indexer.storeDir, undefined);
@@ -318,7 +318,7 @@ test("public digest ignores operator-local network telemetry", async () => {
     getStatus: async () => ({ mode: "test" }),
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.1.1"
+    version: "1.1.2"
   });
 
   const response = await invoke(handler, "GET", "/indexer/digest");
@@ -364,7 +364,7 @@ test("public digest can use precomputed published metadata without loading full 
     },
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.1.1"
+    version: "1.1.2"
   });
 
   const response = await invoke(handler, "GET", "/indexer/digest");
@@ -408,7 +408,7 @@ test("operator metadata routes expose configured safe metadata", async () => {
   assert.equal(operator.body.schema, "pearlscriptions-indexer-operator-v1");
   assert.equal(operator.body.readOnly, true);
   assert.equal(operator.body.configured, true);
-  assert.equal(operator.body.version, "1.1.1");
+  assert.equal(operator.body.version, "1.1.2");
   assert.deepEqual(operator.body.endpoints, {
     health: "/health",
     status: "/indexer/status",
