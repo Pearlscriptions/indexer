@@ -44,7 +44,7 @@ export class PersistentPrl20Indexer {
   }
 
   async status() {
-    await this.load();
+    await this.load({ refresh: true });
     const publishedSnapshot = await this.readPublishedSnapshotForStatus();
     if (publishedSnapshot) {
       return this.buildStatusFromSnapshot(publishedSnapshot, null);
@@ -69,7 +69,7 @@ export class PersistentPrl20Indexer {
   }
 
   async syncToTipUnsafe() {
-    await this.load();
+    await this.load({ refresh: true });
     const bestHeight = normalizeNonNegativeInteger(
       await this.pearlRpc("getblockcount", []),
       "bestHeight"
@@ -116,18 +116,21 @@ export class PersistentPrl20Indexer {
     };
   }
 
-  async load() {
-    if (this.manifest) {
+  async load({ refresh = false } = {}) {
+    if (this.manifest && !refresh) {
       return this.manifest;
     }
 
     await this.storage.init();
     const manifest = await this.storage.readManifest();
 
-    this.manifest = manifest
-      ? normalizeManifest(manifest, this.chain, this.startHeight)
-      : createEmptyManifest(this.chain, this.startHeight, this.now());
+    if (manifest) {
+      this.manifest = normalizeManifest(manifest, this.chain, this.startHeight);
+      validateManifestContinuity(this.manifest);
+      return this.manifest;
+    }
 
+    this.manifest = createEmptyManifest(this.chain, this.startHeight, this.now());
     validateManifestContinuity(this.manifest);
     await this.persistManifest();
     return this.manifest;

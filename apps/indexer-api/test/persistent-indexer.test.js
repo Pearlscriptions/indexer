@@ -514,6 +514,41 @@ test("postgres status follows the published snapshot while manifest is ahead", a
   assert.equal(status.blocksStored, 1);
 });
 
+test("postgres status refreshes manifest written by an external sync worker", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "external-worker-status-test" });
+  const firstBlock = block(1, hash("c1"), null, []);
+  const secondBlock = block(2, hash("c2"), firstBlock.hash, []);
+
+  const initialSyncer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock]),
+    storage,
+    chain: "pearl-simnet",
+    startHeight: 1
+  });
+  await initialSyncer.syncToTip();
+
+  const apiIndexer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock]),
+    storage,
+    chain: "pearl-simnet",
+    startHeight: 1
+  });
+  assert.equal((await apiIndexer.status()).indexedHeight, 1);
+
+  const externalSyncer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock, secondBlock]),
+    storage,
+    chain: "pearl-simnet",
+    startHeight: 1
+  });
+  await externalSyncer.syncToTip();
+
+  const refreshed = await apiIndexer.status();
+  assert.equal(refreshed.indexedHeight, 2);
+  assert.equal(refreshed.indexedHash, secondBlock.hash);
+});
+
 test("persistent indexer fails closed when a stored block file is missing", async () => {
   const storeDir = await mkdtemp(join(tmpdir(), "prl20-indexer-missing-block-test-"));
   const deployBlock = block(1, hash("41"), null, [

@@ -18,6 +18,9 @@ What changed:
   to reduce concurrent writer races.
 - Hardened `registry:check` with well-known proof validation, anti-cache remote
   checks, and stricter status/digest/operator metadata comparisons.
+- Refreshed persistent status reads from durable storage so operators can run
+  a public read API process separately from a private sync worker without
+  serving stale height/status after the worker advances.
 
 Security boundary:
 

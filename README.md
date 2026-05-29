@@ -251,6 +251,7 @@ Do not commit `.env`.
 | [Operator guide](docs/operators.md) | Runbook for syncing, serving, and monitoring an indexer. |
 | [Operator registry v1.1 plan](docs/operator-registry-v1.1-plan.md) | Future registry architecture, proofs, checks, and reward-eligibility planning. |
 | [Operator registry hardening audit](docs/operator-registry-hardening-audit-2026-05-29.md) | Notes on the v1.1.1 digest/status hardening pass. |
+| [Operator API / worker split](docs/operator-api-worker-split-2026-05-29.md) | Notes for running the public API and sync worker as separate processes. |
 | [Configuration reference](docs/configuration.md) | Environment variables and runtime defaults. |
 | [API contract](docs/api-contract.md) | Public read API shape and response rules. |
 | [Architecture](docs/architecture.md) | Repository structure and indexer boundaries. |
