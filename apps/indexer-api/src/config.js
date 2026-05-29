@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PRLS } from "../../../packages/prl20-core/src/index.js";
+import { loadOperatorMetadata } from "./operator-metadata.js";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(MODULE_DIR, "../../..");
@@ -18,6 +19,7 @@ export function loadPublicIndexerConfig(env = undefined, options = {}) {
     ? resolve(env.PRL20_RELEASE_MANIFEST)
     : DEFAULT_RELEASE_MANIFEST_PATH;
   const manifest = readJsonFile(manifestPath, defaultReleaseManifest());
+  const packageJson = readJsonFile(resolve(REPO_ROOT, "package.json"), {});
   const chain = env.PRL20_CHAIN ?? manifest.network ?? "pearl-mainnet";
   const mintFeePolicy = mintFeePolicyFromManifest(manifest);
 
@@ -30,7 +32,9 @@ export function loadPublicIndexerConfig(env = undefined, options = {}) {
     manifestPath,
     manifest,
     manifestDigest: sha256Json(manifest),
+    version: packageJson.version ?? null,
     mintFeePolicy,
+    operator: loadOperatorMetadata(env),
     fixturePath: env.PRL20_FIXTURE_PATH ? resolve(env.PRL20_FIXTURE_PATH) : null,
     pearlRpc: {
       url: env.PEARL_RPC_URL ?? "",

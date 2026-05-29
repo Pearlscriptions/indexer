@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 
 const VOLATILE_NETWORK_KEYS = new Set([
+  "bestHeight",
+  "blocksStored",
+  "reorgCount",
   "source",
+  "startHeight",
   "warning",
   "lastSyncedAt",
   "persistenceReady",
@@ -18,6 +22,10 @@ export function normalizeSnapshotForComparison(snapshot) {
     }
   }
   return normalized;
+}
+
+export function normalizeProtocolSnapshotForComparison(snapshot) {
+  return normalizeSnapshotForComparison(publicProtocolSnapshot(snapshot));
 }
 
 export function snapshotDigest(snapshot) {
@@ -52,6 +60,35 @@ export function summarizeSnapshot(snapshot) {
   };
 }
 
+export function publicProtocolSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return snapshot;
+  }
+  const projected = {};
+  if (snapshot.network && typeof snapshot.network === "object" && !Array.isArray(snapshot.network)) {
+    projected.network = pickDefined(snapshot.network, [
+      "chain",
+      "indexedHeight",
+      "indexedHash",
+      "prl20MintFee"
+    ]);
+  }
+  if (snapshot.state && typeof snapshot.state === "object" && !Array.isArray(snapshot.state)) {
+    projected.state = pickDefined(snapshot.state, [
+      "tokens",
+      "balances",
+      "transferLots",
+      "operations"
+    ]);
+  }
+  for (const key of ["inscriptions", "token", "tokens", "operations", "transferLots"]) {
+    if (snapshot[key] !== undefined) {
+      projected[key] = snapshot[key];
+    }
+  }
+  return projected;
+}
+
 export function stableStringify(value) {
   return JSON.stringify(normalizeValue(value));
 }
@@ -75,6 +112,16 @@ function normalizeValue(value) {
   const output = {};
   for (const key of Object.keys(value).sort()) {
     output[key] = normalizeValue(value[key]);
+  }
+  return output;
+}
+
+function pickDefined(source, keys) {
+  const output = {};
+  for (const key of keys) {
+    if (source[key] !== undefined) {
+      output[key] = source[key];
+    }
   }
   return output;
 }

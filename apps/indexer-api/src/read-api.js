@@ -1,5 +1,10 @@
 import { routeSnapshot } from "./indexer.js";
-import { snapshotDigest, summarizeSnapshot } from "./snapshot-compare.js";
+import { operatorMetadataDocument } from "./operator-metadata.js";
+import {
+  normalizeProtocolSnapshotForComparison,
+  snapshotDigest,
+  summarizeSnapshot
+} from "./snapshot-compare.js";
 
 export function createReadOnlyApi({
   getSnapshot,
@@ -7,11 +12,16 @@ export function createReadOnlyApi({
   storage = null,
   chain,
   manifestDigest,
+  version = null,
+  operatorMetadata = null,
   startedAt = new Date().toISOString()
 }) {
   return async function handleReadOnlyRequest(request, response) {
     try {
       const url = new URL(request.url ?? "/", "http://indexer.local");
+      if (request.method === "HEAD" && url.pathname === "/") {
+        return sendEmpty(response, 200, cacheHeaders("live"));
+      }
       if (request.method !== "GET") {
         return sendJson(response, 405, {
           ok: false,
@@ -20,12 +30,34 @@ export function createReadOnlyApi({
         });
       }
 
+      if (url.pathname === "/") {
+        return sendJson(response, 200, {
+          ok: true,
+          service: "pearlscriptions-indexer",
+          chain,
+          version,
+          readOnly: true,
+          message: "Read-only Pearlscriptions indexer API.",
+          endpoints: {
+            health: "/health",
+            status: "/indexer/status",
+            digest: "/indexer/digest",
+            operator: "/operator",
+            wellKnown: "/.well-known/pearlscriptions-indexer.json",
+            tokens: "/tokens",
+            operations: "/operations",
+            inscriptions: "/inscriptions"
+          }
+        }, cacheHeaders("live"));
+      }
+
       if (url.pathname === "/health") {
         const status = sanitizeStatus(await getStatus());
         return sendJson(response, 200, {
           ok: true,
           service: "pearlscriptions-indexer",
           chain,
+          version,
           readOnly: true,
           startedAt,
           indexer: status
@@ -38,14 +70,24 @@ export function createReadOnlyApi({
 
       if (url.pathname === "/indexer/digest") {
         const snapshot = await getSnapshot();
+        const normalized = normalizeProtocolSnapshotForComparison(snapshot);
         return sendJson(response, 200, {
           chain: snapshot?.network?.chain ?? chain,
           indexedHeight: snapshot?.network?.indexedHeight ?? snapshot?.network?.bestHeight ?? null,
           indexedHash: snapshot?.network?.indexedHash ?? null,
-          snapshotDigest: snapshotDigest(snapshot),
+          snapshotDigest: snapshotDigest(normalized),
           releaseManifestDigest: manifestDigest,
-          summary: summarizeSnapshot(snapshot)
+          summary: summarizeSnapshot(normalized)
         }, cacheHeaders("short"));
+      }
+
+      if (url.pathname === "/operator" || url.pathname === "/.well-known/pearlscriptions-indexer.json") {
+        return sendJson(
+          response,
+          200,
+          operatorMetadataDocument(operatorMetadata, { chain, version }),
+          cacheHeaders("live")
+        );
       }
 
       const readModelResponse = await routeReadModel(storage, url);
@@ -103,6 +145,14 @@ function sendJson(response, status, body, headers = {}) {
     ...headers
   });
   response.end(JSON.stringify(body));
+}
+
+function sendEmpty(response, status, headers = {}) {
+  response.writeHead(status, {
+    "x-content-type-options": "nosniff",
+    ...headers
+  });
+  response.end();
 }
 
 function json(status, body) {

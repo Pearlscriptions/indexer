@@ -16,7 +16,7 @@ Values exported in the shell still take precedence over the file.
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only behind a firewall or reverse proxy. |
 | `PORT` | `3000` | HTTP API port. |
 | `PRL20_CHAIN` | manifest network | Use `pearl-mainnet` for mainnet. |
-| `PRL20_RELEASE_MANIFEST` | `./release-manifest.example.json` | Manifest that pins PRLS launch policy and fee recipient. |
+| `PRL20_RELEASE_MANIFEST` | `./release-manifest.example.json` | Manifest that pins PRLS launch policy and fee recipient. Use `/app/release-manifest.example.json` when running from a container mounted at `/app`. |
 
 ## Pearl RPC
 
@@ -49,6 +49,37 @@ tests and smoke checks, not for a live operator endpoint.
 | `PRL20_INDEXER_BATCH_SIZE` | `100` | Blocks fetched per sync batch, clamped to `1-1000`. |
 | `PRL20_INDEXER_BACKGROUND_SYNC_MS` | `30000` | Background sync interval while serving. Set `0` to disable. |
 | `PRL20_INDEXER_SYNC_ON_START` | `1` | Set `0` to load stored state without syncing on boot. |
+
+## Optional Operator Registry Metadata
+
+These fields are optional and empty by default. They only affect the read-only
+`GET /operator` and `GET /.well-known/pearlscriptions-indexer.json` metadata
+documents plus the local `npm run registry:check` command. They do not register
+with the official Pearlscriptions registry and do not prove reward eligibility
+by themselves.
+
+For future public registry listing, `PRL20_OPERATOR_PUBLIC_URL` should be a
+public HTTPS origin reachable by the official checker. A custom domain is not
+required: a stable provider hostname, HTTPS tunnel, dynamic DNS hostname, or
+custom domain can all work if they serve this indexer over HTTPS. Local HTTP
+URLs are accepted only for local self-checks.
+
+If a value contains spaces, quote it in `.env`, for example
+`PRL20_OPERATOR_NAME="Pearl Operator"`.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PRL20_OPERATOR_NAME` | empty | Public display name, max 80 plain-text characters. |
+| `PRL20_OPERATOR_PUBLIC_URL` | empty | Public HTTPS origin for this indexer. No path, query string, fragment, or credentials. |
+| `PRL20_OPERATOR_REWARD_ADDRESS` | empty | Optional Pearl reward address selected in the future official website flow. It is never required for running an indexer. |
+| `PRL20_OPERATOR_REGION` | empty | Optional public region label, max 40 plain-text characters. |
+| `PRL20_OPERATOR_CONTACT_URL` | empty | Optional HTTPS contact/profile URL. |
+| `PRL20_OPERATOR_REGISTRY_CHALLENGE` | empty | Optional short-lived registry URL-proof challenge value. |
+
+Reward-address proof is wallet-selected but cryptographically deferred for
+v1.1. The future official registry may bind the selected reward address to the
+URL challenge, but this indexer never receives wallet seeds, private keys, WIFs,
+wallet exports, or signing material.
 
 ## Safety Defaults
 

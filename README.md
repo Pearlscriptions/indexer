@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.0</code>
+  <code>v1.1.0</code>
   ·
   <code>node >=22</code>
   ·
@@ -36,7 +36,7 @@
 
 <p align="center">
   Run your own Pearl-backed indexer, reproduce canonical inscription numbers,
-  derive PRL-20 state, and compare deterministic digests with other v1.0.0
+  derive PRL-20 state, and compare deterministic digests with other v1.1.0
   operators.
 </p>
 
@@ -51,8 +51,10 @@ trading APIs.
 The official Pearlscriptions marketplace is an application layer built on top of
 transfer lots. It is not part of this public indexer release.
 
-The `v1.0.0` release is the first operator-ready public indexer package. It is
-designed for independent verification and read-only API operation.
+The `v1.1.0` release keeps the public indexer read-only and adds optional
+operator metadata for the Pearlscriptions operator registry. Registration,
+monitoring, scoring, and rewards remain official application-layer services
+outside this repository.
 
 <table>
   <tr>
@@ -127,6 +129,8 @@ npm run indexer:serve
 ```
 
 The API binds to `127.0.0.1:3000` by default.
+If your Docker install uses the legacy Compose binary, `docker-compose up -d
+postgres` is equivalent for the bundled local database service.
 
 The CLI loads `.env` automatically. Exported shell variables override values in
 the file.
@@ -140,7 +144,48 @@ npm run indexer:sync    # sync to the current Pearl tip
 npm run indexer:status  # inspect sync and storage status
 npm run indexer:digest  # print the canonical snapshot digest
 npm run indexer:serve   # serve the read-only HTTP API
+npm run registry:check  # local readiness check for future operator registry
 ```
+
+## Optional Operator Metadata
+
+v1.1 can advertise safe public operator metadata at `/operator` and
+`/.well-known/pearlscriptions-indexer.json`. These endpoints are empty by
+default unless you set optional `PRL20_OPERATOR_*` environment variables.
+
+The official registry requires a public HTTPS indexer URL so the checker can
+verify health, height, digest, and URL-control challenge state server-side. A
+custom domain is not required: operators may use a stable HTTPS hostname from a
+provider, tunnel, dynamic DNS service, or their own domain. `http://localhost`,
+`http://127.0.0.1`, and `http://[::1]` are only for local self-checks.
+
+Cloudflare quick tunnels are acceptable for short beta experiments, but a stable
+HTTPS hostname is better for long-running registry identity and reward review.
+
+Reward addresses are selected in the official website flow. Operators should use
+an address they control, but the public indexer never signs messages, creates
+wallets, broadcasts transactions, or distributes rewards.
+
+## Register Your Indexer
+
+After your indexer is synced and reachable from a public HTTPS URL:
+
+1. Open [pearlscriptions.com/indexers](https://www.pearlscriptions.com/indexers).
+2. Connect the wallet address you want associated with future operator review.
+3. Enter your public indexer URL and optional display details.
+4. Generate the verification code.
+5. Copy the generated `.env` snippet into your indexer environment and restart
+   the indexer.
+6. Run a local check:
+
+   ```bash
+   npm run registry:check -- --url https://your-indexer.example
+   ```
+
+7. Return to the Indexers page and submit the registration.
+
+Early operators may be reviewed for future Genesis Oyster rewards, but rewards
+are manual, optional, and not guaranteed.
 
 ## Read API
 
@@ -149,6 +194,8 @@ The HTTP server exposes `GET` routes only. Any `POST`, `PUT`, `PATCH`, or
 
 ```text
 GET /health
+GET /operator
+GET /.well-known/pearlscriptions-indexer.json
 GET /indexer/status
 GET /indexer/digest
 GET /network
@@ -198,6 +245,7 @@ Do not commit `.env`.
 | Document | Purpose |
 | --- | --- |
 | [Operator guide](docs/operators.md) | Runbook for syncing, serving, and monitoring an indexer. |
+| [Operator registry v1.1 plan](docs/operator-registry-v1.1-plan.md) | Future registry architecture, proofs, checks, and reward-eligibility planning. |
 | [Configuration reference](docs/configuration.md) | Environment variables and runtime defaults. |
 | [API contract](docs/api-contract.md) | Public read API shape and response rules. |
 | [Architecture](docs/architecture.md) | Repository structure and indexer boundaries. |

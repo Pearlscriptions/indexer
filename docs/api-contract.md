@@ -17,8 +17,43 @@ Important fields:
 - `ok`
 - `service`
 - `chain`
+- `version`
 - `readOnly`
 - `indexer`
+
+### `GET /operator`
+
+Returns optional public operator metadata for future registry compatibility. It
+is read-only and may be empty by default.
+
+Important fields:
+
+- `schema`
+- `service`
+- `readOnly`
+- `configured`
+- `chain`
+- `version`
+- `endpoints`
+- `operator`
+- `registry`
+
+The response must not include RPC credentials, database URLs, local paths,
+private IPs, wallet material, or signing payloads.
+
+`operator.publicUrl`, when configured, must be a public HTTPS origin with no
+path, query string, fragment, or credentials. A custom domain is not required;
+the URL can be any stable public HTTPS hostname that serves this indexer.
+
+`registry.rewardAddressProof` is `wallet-selected-deferred` when a reward
+address is configured and `not-configured` otherwise. It does not mean the
+public indexer has verified wallet control. Any future wallet proof belongs to
+the official registry application layer, not this API.
+
+### `GET /.well-known/pearlscriptions-indexer.json`
+
+Returns the same operator metadata document as `/operator`, suitable for future
+URL-control challenge checks.
 
 ### `GET /indexer/status`
 

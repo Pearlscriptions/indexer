@@ -78,23 +78,29 @@ export async function createPublicIndexerRuntime(config = loadPublicIndexerConfi
   };
 }
 
-export async function startServer(config = loadPublicIndexerConfig()) {
+export async function startServer(config = loadPublicIndexerConfig(), options = {}) {
   const runtime = await createPublicIndexerRuntime(config);
   const handler = createReadOnlyApi({
     getSnapshot: runtime.getSnapshot,
     getStatus: runtime.getStatus,
     storage: runtime.storage,
     chain: config.chain,
-    manifestDigest: config.manifestDigest
+    manifestDigest: config.manifestDigest,
+    version: config.version,
+    operatorMetadata: config.operator
   });
   const server = createServer(handler);
-  await new Promise((resolveStart, rejectStart) => {
-    server.once("error", rejectStart);
-    server.listen(config.port, config.host, () => {
-      server.off("error", rejectStart);
-      resolveStart();
+  let listening = false;
+  if (options.listen !== false) {
+    await new Promise((resolveStart, rejectStart) => {
+      server.once("error", rejectStart);
+      server.listen(config.port, config.host, () => {
+        server.off("error", rejectStart);
+        listening = true;
+        resolveStart();
+      });
     });
-  });
+  }
 
   let syncTimer = null;
   if (runtime.indexer && config.backgroundSyncMs > 0) {
@@ -104,11 +110,15 @@ export async function startServer(config = loadPublicIndexerConfig()) {
   }
 
   return {
+    config,
     server,
     runtime,
     close() {
       if (syncTimer) {
         clearInterval(syncTimer);
+      }
+      if (!listening) {
+        return Promise.resolve();
       }
       return new Promise((resolveClose, rejectClose) => {
         server.close((error) => (error ? rejectClose(error) : resolveClose()));
