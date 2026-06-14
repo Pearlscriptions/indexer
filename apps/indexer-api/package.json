@@ -1,6 +1,6 @@
 {
   "name": "@pearlscriptions/indexer-api",
-  "version": "1.1.2",
+  "version": "1.2.1",
   "license": "MIT",
   "type": "module",
   "main": "./src/indexer.js",
@@ -9,6 +9,8 @@
     "start": "node src/server.js",
     "serve": "node src/cli.js serve",
     "sync": "node src/cli.js sync",
+    "worker": "node src/cli.js worker",
+    "api": "PRL20_INDEXER_ROLE=api node src/cli.js serve",
     "status": "node src/cli.js status",
     "digest": "node src/cli.js digest",
     "registry:check": "node src/cli.js registry:check"

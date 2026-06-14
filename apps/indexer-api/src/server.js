@@ -11,12 +11,27 @@ import { createReadOnlyApi } from "./read-api.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultFixturePath = resolve(__dirname, "..", "fixtures", "prls-mock-blocks.json");
 
-export async function createPublicIndexerRuntime(config = loadPublicIndexerConfig()) {
+export async function createPublicIndexerRuntime(config = loadPublicIndexerConfig(), options = {}) {
   let fixture = null;
   let indexer = null;
   let storage = null;
+  // The 'api' role never writes: a separate worker process is the sole writer,
+  // so the api process must not sync on start nor fall back to syncToTip on a
+  // cache miss (that would make a read-only replica a competing writer).
+  const role = config.role ?? "all";
+  const readOnlyRole = role === "api";
 
-  if (config.pearlRpc.url) {
+  // Test seam: callers may inject a pre-built indexer + storage instead of
+  // constructing one from a live RPC URL. Production code never passes these.
+  if (options.indexer) {
+    indexer = options.indexer;
+    storage = options.storage ?? indexer.storage ?? null;
+    if (config.syncOnStart && !readOnlyRole) {
+      await indexer.syncToTip();
+    } else if (typeof indexer.load === "function") {
+      await indexer.load();
+    }
+  } else if (config.pearlRpc.url) {
     const pearlRpc = createPearlRpcClient(config.pearlRpc);
     storage = createIndexerStorage({
       backend: config.storage.backend,
@@ -30,9 +45,14 @@ export async function createPublicIndexerRuntime(config = loadPublicIndexerConfi
       chain: config.chain,
       startHeight: config.startHeight,
       batchSize: config.batchSize,
-      mintFeePolicy: config.mintFeePolicy
+      mintFeePolicy: config.mintFeePolicy,
+      // MoE hard fork advisory inputs (additive). Surfaced in status/health and
+      // used for the anti-old-chain checkpoint check; never alter PRL-20 state.
+      canonicalCheckpoints: config.canonicalCheckpoints,
+      forkEra: config.forkEra,
+      indexerVersion: config.version
     });
-    if (config.syncOnStart) {
+    if (config.syncOnStart && !readOnlyRole) {
       await indexer.syncToTip();
     } else {
       await indexer.load();
@@ -47,6 +67,11 @@ export async function createPublicIndexerRuntime(config = loadPublicIndexerConfi
       const stored = await storage.readSnapshot();
       if (stored) {
         return stored;
+      }
+      if (readOnlyRole) {
+        // No worker has published a snapshot yet. Return a clear, read-only
+        // "not yet published" snapshot instead of triggering an in-process sync.
+        return unpublishedSnapshot(config);
       }
       return (await indexer.syncToTip()).snapshot;
     }
@@ -79,7 +104,7 @@ export async function createPublicIndexerRuntime(config = loadPublicIndexerConfi
 }
 
 export async function startServer(config = loadPublicIndexerConfig(), options = {}) {
-  const runtime = await createPublicIndexerRuntime(config);
+  const runtime = await createPublicIndexerRuntime(config, { indexer: options.indexer, storage: options.storage });
   const handler = createReadOnlyApi({
     getSnapshot: runtime.getSnapshot,
     getStatus: runtime.getStatus,
@@ -87,7 +112,8 @@ export async function startServer(config = loadPublicIndexerConfig(), options = 
     chain: config.chain,
     manifestDigest: config.manifestDigest,
     version: config.version,
-    operatorMetadata: config.operator
+    operatorMetadata: config.operator,
+    forkEra: config.forkEra
   });
   const server = createServer(handler);
   let listening = false;
@@ -102,8 +128,11 @@ export async function startServer(config = loadPublicIndexerConfig(), options = 
     });
   }
 
+  // Only the default 'all' role arms an in-process background sync. The 'api'
+  // role never syncs in-process; the 'worker' role drives the loop from
+  // `cli.js worker` rather than from inside the HTTP server.
   let syncTimer = null;
-  if (runtime.indexer && config.backgroundSyncMs > 0) {
+  if ((config.role ?? "all") === "all" && runtime.indexer && config.backgroundSyncMs > 0) {
     syncTimer = setInterval(() => {
       runtime.indexer.syncToTip().catch((error) => {
         process.stderr.write(
@@ -129,6 +158,31 @@ export async function startServer(config = loadPublicIndexerConfig(), options = 
       });
     }
   };
+}
+
+// Read-only 'api' role response when no worker has published a snapshot yet.
+// Folds zero blocks so the snapshot is fully shaped (empty inscriptions/tokens/
+// indexes) and every read route resolves without an in-process sync, while the
+// network block flags that the snapshot is not yet published.
+function unpublishedSnapshot(config) {
+  const snapshot = ingestPearlBlocksFixture({
+    network: {
+      chain: config.chain,
+      source: "api-role-awaiting-worker",
+      published: false
+    },
+    prl20MintFee: config.mintFeePolicy,
+    blocks: []
+  });
+  snapshot.network = {
+    ...snapshot.network,
+    published: false,
+    indexedHeight: null,
+    indexedHash: null,
+    message:
+      "Snapshot not yet published. This API process is read-only (PRL20_INDEXER_ROLE=api); a separate worker publishes the snapshot."
+  };
+  return snapshot;
 }
 
 function safeErrorMessage(error) {

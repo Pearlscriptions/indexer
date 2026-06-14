@@ -1,6 +1,6 @@
 {
   "name": "pearlscriptions-indexer",
-  "version": "1.1.2",
+  "version": "1.2.1",
   "private": true,
   "description": "Read-only Pearlscriptions and PRL-20 indexer for Pearl.",
   "license": "MIT",
@@ -14,6 +14,8 @@
     "verify": "npm test",
     "start": "npm run start --workspace @pearlscriptions/indexer-api",
     "indexer:serve": "npm run serve --workspace @pearlscriptions/indexer-api",
+    "indexer:api": "npm run api --workspace @pearlscriptions/indexer-api",
+    "indexer:worker": "npm run worker --workspace @pearlscriptions/indexer-api",
     "indexer:sync": "npm run sync --workspace @pearlscriptions/indexer-api",
     "indexer:status": "npm run status --workspace @pearlscriptions/indexer-api",
     "indexer:digest": "npm run digest --workspace @pearlscriptions/indexer-api",

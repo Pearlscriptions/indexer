@@ -14,6 +14,8 @@ export function createReadOnlyApi({
   manifestDigest,
   version = null,
   operatorMetadata = null,
+  // MoE hard fork: static advisory tag surfaced on /operator (optional).
+  forkEra = null,
   startedAt = new Date().toISOString()
 }) {
   return async function handleReadOnlyRequest(request, response) {
@@ -53,15 +55,30 @@ export function createReadOnlyApi({
 
       if (url.pathname === "/health") {
         const status = sanitizeStatus(await getStatus());
-        return sendJson(response, 200, {
+        // MoE hard fork advisory surface (additive). ok stays true even on a
+        // checkpoint mismatch or a too-old node so basic monitoring is never
+        // broken; the warning field carries the human-readable advisory message.
+        const health = {
           ok: true,
           service: "pearlscriptions-indexer",
           chain,
           version,
           readOnly: true,
           startedAt,
+          indexerVersion: status.indexerVersion ?? version ?? null,
+          pearlNodeVersion: status.pearlNodeVersion ?? null,
+          checkpoint: status.checkpoint ?? null,
+          // Fall back to the statically configured era (e.g. fixture mode, where
+          // the status object has no advisory fields) so /health and /operator
+          // advertise the same forkEra.
+          forkEra: status.forkEra ?? forkEra ?? null,
+          nodeSchema: status.nodeSchema ?? null,
           indexer: status
-        }, cacheHeaders("live"));
+        };
+        if (status.message) {
+          health.warning = status.message;
+        }
+        return sendJson(response, 200, health, cacheHeaders("live"));
       }
 
       if (url.pathname === "/indexer/status") {
@@ -69,9 +86,15 @@ export function createReadOnlyApi({
       }
 
       if (url.pathname === "/indexer/digest") {
+        // MoE hard fork: expose checkpoint + forkEra as SIBLING keys so the
+        // private registry checker can derive states. These are pulled from
+        // status and are explicitly NOT part of snapshotDigest (the digest only
+        // covers the protocol snapshot allowlist). The digest itself stays
+        // byte-identical for the same chain.
+        const advisory = digestAdvisoryFields(await safeStatus(getStatus), forkEra);
         const publishedDigest = await readPublishedDigest(storage, { chain, manifestDigest });
         if (publishedDigest) {
-          return sendJson(response, 200, publishedDigest, cacheHeaders("live"));
+          return sendJson(response, 200, { ...publishedDigest, ...advisory }, cacheHeaders("live"));
         }
         const snapshot = await getSnapshot();
         const normalized = normalizeProtocolSnapshotForComparison(snapshot);
@@ -81,7 +104,8 @@ export function createReadOnlyApi({
           indexedHash: snapshot?.network?.indexedHash ?? null,
           snapshotDigest: snapshotDigest(normalized),
           releaseManifestDigest: manifestDigest,
-          summary: summarizeSnapshot(normalized)
+          summary: summarizeSnapshot(normalized),
+          ...advisory
         }, cacheHeaders("live"));
       }
 
@@ -89,7 +113,7 @@ export function createReadOnlyApi({
         return sendJson(
           response,
           200,
-          operatorMetadataDocument(operatorMetadata, { chain, version }),
+          operatorMetadataDocument(operatorMetadata, { chain, version, forkEra }),
           cacheHeaders("live")
         );
       }
@@ -159,6 +183,27 @@ function sanitizeStatus(status) {
     delete cleaned.storage.storeDir;
   }
   return cleaned;
+}
+
+// Best-effort status fetch for the digest endpoint's advisory siblings. A status
+// failure must not break /indexer/digest, so any error degrades to {}.
+async function safeStatus(getStatus) {
+  try {
+    return (await getStatus()) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+// MoE hard fork: the checkpoint + forkEra siblings the digest endpoint exposes
+// for the private registry checker. Loosely shaped; never folded into the digest.
+// forkEra falls back to the statically configured era when status omits it.
+function digestAdvisoryFields(status, configuredForkEra = null) {
+  return {
+    checkpoint: status?.checkpoint ?? null,
+    forkEra: status?.forkEra ?? configuredForkEra ?? null,
+    pearlNodeVersion: status?.pearlNodeVersion ?? null
+  };
 }
 
 function sendJson(response, status, body, headers = {}) {

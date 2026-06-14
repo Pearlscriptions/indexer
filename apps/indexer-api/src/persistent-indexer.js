@@ -1,4 +1,4 @@
-import { ingestPearlBlocksFixture, PRLS_MINT_FEE_POLICY } from "./indexer.js";
+import { createPrl20IngestSession, PRLS_MINT_FEE_POLICY } from "./indexer.js";
 import {
   normalizeProtocolSnapshotForComparison,
   snapshotDigest,
@@ -7,6 +7,12 @@ import {
 import { assertHash, blockFileName, createIndexerStorage } from "./storage.js";
 
 const SCHEMA_VERSION = 1;
+
+// MoE hard fork: minimum pearld version that activated the fork (2026-06-12).
+// Advisory only — used to flag a node that predates the fork, never to block.
+const MIN_NODE_VERSION = "1.1.0";
+// btcd-style integer version encoding: major*1_000_000 + minor*10_000 + patch*100.
+const MIN_NODE_VERSION_INT = 1010000;
 
 export function createPersistentPrl20Indexer(options = {}) {
   return new PersistentPrl20Indexer(options);
@@ -22,6 +28,16 @@ export class PersistentPrl20Indexer {
     startHeight = 0,
     batchSize = 100,
     mintFeePolicy = PRLS_MINT_FEE_POLICY,
+    rebuildChunkSize,
+    parityCheckEveryNBlocks,
+    // MoE hard fork advisory inputs (all optional / additive). canonicalCheckpoints
+    // are the normalized pins from config ({ height, hash, placeholder }); forkEra
+    // and indexerVersion are surfaced verbatim in status. None of these ever
+    // mutate PRL-20 state, balances, or rollback — they are advisory only.
+    canonicalCheckpoints = [],
+    forkEra = "moe-v2",
+    indexerVersion = null,
+    log = console,
     now = () => new Date().toISOString()
   } = {}) {
     if (typeof pearlRpc !== "function") {
@@ -38,9 +54,67 @@ export class PersistentPrl20Indexer {
     this.startHeight = normalizeNonNegativeInteger(startHeight, "startHeight");
     this.batchSize = Math.max(1, Math.min(1000, normalizeNonNegativeInteger(batchSize, "batchSize")));
     this.mintFeePolicy = mintFeePolicy;
+    // Full rebuilds read and fold canonical blocks in bounded chunks so the
+    // worker never holds the entire raw-block history in memory at once (that
+    // simultaneous load was the cold-start OOM). Only the current chunk plus the
+    // live session accumulators are resident. Env override is clamped to 1..5000.
+    const rebuildChunkEnvRaw = Number(process.env.PRL20_INDEXER_REBUILD_CHUNK_SIZE);
+    const rebuildChunkEnv =
+      Number.isInteger(rebuildChunkEnvRaw) && rebuildChunkEnvRaw > 0 ? rebuildChunkEnvRaw : 0;
+    this.rebuildChunkSize = Math.max(
+      1,
+      Math.min(5000, Number(rebuildChunkSize ?? rebuildChunkEnv) || 250)
+    );
     this.now = now;
     this.manifest = null;
     this.syncPromise = null;
+    // Incremental ingest state. The session keeps the fold accumulators (PRL-20
+    // state + inscriptions + transaction index) alive between syncs so each
+    // appended block costs O(block) instead of an O(history) rebuild from
+    // genesis. sessionBlocks tracks the canonical (height, hash) pairs already
+    // folded in, letting us detect when the stored chain still extends the
+    // session tip (pure append) versus a rollback/reorg (full rebuild).
+    this.ingestSession = null;
+    this.sessionBlocks = [];
+    // Optional safety net: every N appended blocks, also run a full rebuild and
+    // compare protocol digests. 0 (default) disables it. Clamped >= 0.
+    const parityEnvRaw = Number(process.env.PRL20_INDEXER_PARITY_CHECK_EVERY_N_BLOCKS);
+    const parityEnv = Number.isInteger(parityEnvRaw) && parityEnvRaw >= 0 ? parityEnvRaw : 0;
+    this.parityCheckEveryNBlocks = Math.max(
+      0,
+      normalizeNonNegativeInteger(parityCheckEveryNBlocks ?? parityEnv, "parityCheckEveryNBlocks")
+    );
+    this.blocksAppliedSinceParityCheck = 0;
+    this.log = log;
+    // Observability hook for tests: records which ingest path the last sync took
+    // ("incremental" | "full-rebuild").
+    this.lastIngestPath = null;
+
+    // --- MoE hard fork advisory status (ADVISORY ONLY; never alters parsing,
+    // balances, or rollback). ---
+    // Normalized canonical checkpoint pins from config ({ height, hash,
+    // placeholder }). Real-hash pins at/below indexedHeight are compared to the
+    // stored block hash to detect a non-canonical (old/forked) chain.
+    this.canonicalCheckpoints = Array.isArray(canonicalCheckpoints) ? canonicalCheckpoints : [];
+    this.forkEra = forkEra ?? "moe-v2";
+    this.indexerVersion = indexerVersion ?? null;
+    // Result of verifyCanonicalCheckpoints(): { status, height, expectedHash,
+    // observedHash } with status in {match, mismatch, unknown}. Starts unknown.
+    this.checkpointStatus = {
+      status: "unknown",
+      height: null,
+      expectedHash: null,
+      observedHash: null
+    };
+    // Best-effort node version from getnetworkinfo: { raw, semver|null,
+    // meetsMinimum:bool|null, minimum }. Null until readNodeVersion() runs.
+    this.nodeVersion = null;
+    this.minNodeVersion = MIN_NODE_VERSION;
+    // getblock schema compatibility flag (ITEM 6). 'unknown' until the first
+    // successful getblock; then 'compatible' or 'incompatible'. On 'incompatible'
+    // we surface the flag instead of silently indexing empty blocks; we never
+    // throw or crash the sync loop.
+    this.nodeSchema = "unknown";
   }
 
   async status() {
@@ -78,6 +152,13 @@ export class PersistentPrl20Indexer {
     const rollbackChanged = await this.rollbackDisconnectedTip(bestHeight);
     const appendChanged = await this.appendMissingBlocks(bestHeight);
 
+    // MoE hard fork advisory checks (run inside the existing sync lock, after the
+    // chain work settles, on every sync regardless of which snapshot path is
+    // taken below). All best-effort: they update advisory status only and must
+    // never throw, mutate PRL-20 state, or affect rollback.
+    this.verifyCanonicalCheckpoints();
+    await this.readNodeVersion();
+
     if (!rollbackChanged && !appendChanged && this.canUseStoredSnapshotFastPath(bestHeight)) {
       const snapshot = await this.storage.readSnapshot();
       if (snapshot && snapshotMatchesManifest(snapshot, this.manifest)) {
@@ -101,8 +182,10 @@ export class PersistentPrl20Indexer {
       }
     }
 
-    const blocks = await this.readCanonicalBlocks();
-    const snapshot = this.buildSnapshot(bestHeight, blocks);
+    const { snapshot, blocks, blockCount } = await this.materializeSnapshot(
+      bestHeight,
+      rollbackChanged
+    );
     await this.storage.writeSnapshot(snapshot);
 
     return {
@@ -111,8 +194,328 @@ export class PersistentPrl20Indexer {
       indexedHeight: this.manifest.indexedHeight,
       indexedHash: this.manifest.indexedHash,
       blocks,
+      blockCount: blockCount ?? blocks.length,
       snapshot,
       status: this.buildStatus(bestHeight)
+    };
+  }
+
+  // MoE hard fork anti-old-chain check (ADVISORY ONLY).
+  //
+  // For each configured (non-placeholder) checkpoint pin at or below the current
+  // indexedHeight, compares the manifest's stored block hash at that height to
+  // the pinned hash. The manifest block list is contiguous and height-ordered
+  // (validateManifestContinuity), so the stored hash is
+  // manifest.blocks[height - startHeight].hash.
+  //
+  // Sets this.checkpointStatus = { status, height, expectedHash, observedHash }:
+  //   'match'    - at least one pin was applicable and ALL applicable pins agree.
+  //   'mismatch' - ANY applicable pin disagrees (reports the first mismatch).
+  //   'unknown'  - no pins, only placeholder pins, or indexedHeight is still below
+  //                the lowest applicable pin (nothing to compare yet).
+  //
+  // NEVER throws and NEVER mutates PRL-20 state / balances / rollback.
+  verifyCanonicalCheckpoints() {
+    const result = { status: "unknown", height: null, expectedHash: null, observedHash: null };
+    try {
+      const indexedHeight = this.manifest?.indexedHeight;
+      const startHeight = this.manifest?.startHeight ?? 0;
+      const blocks = this.manifest?.blocks ?? [];
+      let applicableCount = 0;
+      let firstMatch = null;
+
+      for (const checkpoint of this.canonicalCheckpoints) {
+        if (!checkpoint || checkpoint.placeholder) {
+          continue;
+        }
+        if (indexedHeight === null || indexedHeight === undefined || checkpoint.height > indexedHeight) {
+          // Not yet indexed up to this pin; cannot judge it.
+          continue;
+        }
+        const stored = blocks[checkpoint.height - startHeight];
+        const observedHash = stored?.hash ?? null;
+        const expectedHash = String(checkpoint.hash).toLowerCase();
+        const normalizedObserved = observedHash ? String(observedHash).toLowerCase() : null;
+        applicableCount += 1;
+        if (normalizedObserved !== expectedHash) {
+          this.checkpointStatus = {
+            status: "mismatch",
+            height: checkpoint.height,
+            expectedHash,
+            observedHash: normalizedObserved
+          };
+          return this.checkpointStatus;
+        }
+        if (!firstMatch) {
+          firstMatch = {
+            status: "match",
+            height: checkpoint.height,
+            expectedHash,
+            observedHash: normalizedObserved
+          };
+        }
+      }
+
+      if (applicableCount > 0 && firstMatch) {
+        this.checkpointStatus = firstMatch;
+        return this.checkpointStatus;
+      }
+    } catch (error) {
+      this.log?.error?.(
+        JSON.stringify({ evt: "indexer-checkpoint-verify-error", message: safeText(error) })
+      );
+    }
+    this.checkpointStatus = result;
+    return this.checkpointStatus;
+  }
+
+  // MoE hard fork node-version probe (ADVISORY ONLY, best-effort).
+  //
+  // Calls getnetworkinfo and parses the pearld semver out of `subversion`
+  // (e.g. "/pearlwire:0.5.0/pearld:1.0.6/", robust to suffixes like "-presync").
+  // Falls back to the integer `version` field (btcd-style encoding) when the
+  // subversion cannot be parsed. The method MAY be absent on some builds, so the
+  // whole thing is wrapped in try/catch: on any error it stores nulls and the
+  // sync continues. NEVER throws, NEVER blocks sync.
+  //
+  // Stores this.nodeVersion = { raw, semver|null, meetsMinimum:bool|null, minimum }.
+  async readNodeVersion() {
+    try {
+      const info = await this.pearlRpc("getnetworkinfo", []);
+      const raw = info?.subversion ?? null;
+      const semver = parsePearldSemver(raw);
+      let meetsMinimum = null;
+      if (semver) {
+        meetsMinimum = compareSemver(semver, MIN_NODE_VERSION) >= 0;
+      } else if (Number.isInteger(info?.version)) {
+        meetsMinimum = info.version >= MIN_NODE_VERSION_INT;
+      }
+      this.nodeVersion = {
+        raw,
+        semver: semver ?? null,
+        meetsMinimum,
+        minimum: MIN_NODE_VERSION
+      };
+    } catch (error) {
+      // getnetworkinfo missing / RPC failure: degrade to nulls, never throw.
+      this.nodeVersion = {
+        raw: null,
+        semver: null,
+        meetsMinimum: null,
+        minimum: MIN_NODE_VERSION
+      };
+      this.log?.debug?.(
+        JSON.stringify({ evt: "indexer-node-version-unavailable", message: safeText(error) })
+      );
+    }
+    return this.nodeVersion;
+  }
+
+  // ITEM 6 getblock-schema compatibility check (ADVISORY ONLY). Called from
+  // appendMissingBlocks on the first successful getblock of a sync. Asserts the
+  // block carries height/hash/previousblockhash/time and a tx array
+  // (rawtx|tx|transactions) whose entries have hex (rawTxHex) | txid. On a missing
+  // required field, sets this.nodeSchema='incompatible' and logs; otherwise
+  // 'compatible'. NEVER throws / crashes sync.
+  checkBlockSchema(block) {
+    try {
+      if (isCompatibleGetblockSchema(block)) {
+        this.nodeSchema = "compatible";
+      } else {
+        this.nodeSchema = "incompatible";
+        this.log?.error?.(
+          JSON.stringify({
+            evt: "indexer-node-schema-incompatible",
+            height: block?.height ?? null,
+            hash: block?.hash ?? null
+          })
+        );
+      }
+    } catch {
+      this.nodeSchema = "incompatible";
+    }
+    return this.nodeSchema;
+  }
+
+  // Chooses the incremental ingest path when the stored chain is a pure append
+  // on top of the live session tip; otherwise rebuilds the session from all
+  // canonical blocks in bounded chunks (Fix C). Returns the published snapshot
+  // plus the blocks read off disk for this sync (only the appended slice on the
+  // fast path; an empty array from a full rebuild so the whole history is never
+  // re-materialized into one array).
+  async materializeSnapshot(bestHeight, rollbackChanged) {
+    const sessionInSync =
+      !rollbackChanged && this.ingestSession && this.sessionExtendsStoredChain();
+    const appendedManifestBlocks = sessionInSync
+      ? this.manifest.blocks.slice(this.sessionBlocks.length)
+      : this.manifest.blocks;
+
+    if (sessionInSync && appendedManifestBlocks.length === 0) {
+      // No new blocks since the session last published. Backends with
+      // materialized read models (postgres) keep the legacy reconciliation path
+      // so a stale stored snapshot is rebuilt from canonical blocks; the
+      // in-memory json worker simply republishes the live accumulators
+      // (O(state), no O(history) re-fold).
+      if (this.storage.publicStatus?.().readModels === true) {
+        return this.rebuildSnapshot(bestHeight);
+      }
+      this.lastIngestPath = "incremental";
+      return { snapshot: this.publishSessionSnapshot(bestHeight), blocks: [], blockCount: 0 };
+    }
+
+    const canIncrement = sessionInSync && appendedManifestBlocks.length > 0;
+    if (!canIncrement) {
+      // Full rebuild covers rollbacks and a missing/out-of-sync session.
+      // Incremental only fires for a pure append on top of the live session tip.
+      return this.rebuildSnapshot(bestHeight);
+    }
+
+    const appendedBlocks = await this.storage.readBlocks(appendedManifestBlocks);
+    for (let index = 0; index < appendedBlocks.length; index += 1) {
+      this.ingestSession.applyBlock(appendedBlocks[index]);
+      this.sessionBlocks.push({
+        height: appendedManifestBlocks[index].height,
+        hash: appendedManifestBlocks[index].hash
+      });
+      this.blocksAppliedSinceParityCheck += 1;
+    }
+
+    this.lastIngestPath = "incremental";
+    let snapshot = this.publishSessionSnapshot(bestHeight);
+    snapshot = await this.maybeParityCheck(snapshot, bestHeight);
+    return { snapshot, blocks: appendedBlocks, blockCount: appendedBlocks.length };
+  }
+
+  async rebuildSnapshot(bestHeight) {
+    const session = createPrl20IngestSession({ mintFeePolicy: this.mintFeePolicy });
+    const manifestBlocks = this.manifest.blocks;
+    // Read and fold the canonical chain in manifest order, one bounded chunk at a
+    // time. manifest.blocks is contiguous and height-ordered (enforced by
+    // validateManifestContinuity), so chunked application is byte-identical to a
+    // single ordered fold — only the per-chunk raw blocks are ever resident, and
+    // the whole-history re-sort the legacy path did is unnecessary.
+    for (let start = 0; start < manifestBlocks.length; start += this.rebuildChunkSize) {
+      const slice = manifestBlocks.slice(start, start + this.rebuildChunkSize);
+      const chunkBlocks = await this.storage.readBlocks(slice);
+      for (const block of chunkBlocks) {
+        session.applyBlock(block);
+      }
+      // chunkBlocks/slice fall out of scope on the next iteration so the GC can
+      // reclaim the raw-block memory before the next chunk is read.
+    }
+    this.ingestSession = session;
+    // Track the canonical (height, hash) pairs in manifest order so a later
+    // append can confirm the session still prefixes the stored chain.
+    this.sessionBlocks = manifestBlocks.map((block) => ({
+      height: block.height,
+      hash: block.hash
+    }));
+    this.blocksAppliedSinceParityCheck = 0;
+    this.lastIngestPath = "full-rebuild";
+    const snapshot = this.publishSessionSnapshot(bestHeight);
+    // Do not return the raw blocks: re-materializing the whole history here would
+    // reintroduce the very memory spike this chunking removes. Callers that need a
+    // count use blockCount; the appended-blocks fast path still returns its slice.
+    return { snapshot, blocks: [], blockCount: manifestBlocks.length };
+  }
+
+  // Builds the published snapshot from the live session accumulators and tags it
+  // with the published-snapshot metadata (protocol digest + summary) the API and
+  // status paths read back, exactly as buildSnapshot(bestHeight, blocks) did.
+  publishSessionSnapshot(bestHeight) {
+    const snapshot = this.ingestSession.buildSnapshot({
+      network: this.buildNetworkMeta(bestHeight),
+      prlBalances: {},
+      utxos: null
+    });
+    return withPublishedSnapshotMetadata(snapshot);
+  }
+
+  // True when the blocks already folded into the session are an exact, in-order
+  // prefix of the currently stored canonical chain (pure append on top).
+  sessionExtendsStoredChain() {
+    if (this.sessionBlocks.length > this.manifest.blocks.length) {
+      return false;
+    }
+    for (let index = 0; index < this.sessionBlocks.length; index += 1) {
+      const sessionBlock = this.sessionBlocks[index];
+      const storedBlock = this.manifest.blocks[index];
+      if (
+        !storedBlock ||
+        sessionBlock.height !== storedBlock.height ||
+        sessionBlock.hash !== storedBlock.hash
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Optional safety net: every N appended blocks, also run a full chunked rebuild
+  // and compare protocol digests. On mismatch, keep the full-rebuild result,
+  // reset the session, and log a structured error.
+  async maybeParityCheck(incrementalSnapshot, bestHeight) {
+    if (
+      this.parityCheckEveryNBlocks <= 0 ||
+      this.blocksAppliedSinceParityCheck < this.parityCheckEveryNBlocks
+    ) {
+      return incrementalSnapshot;
+    }
+    this.blocksAppliedSinceParityCheck = 0;
+    const sessionSnapshot = this.ingestSession;
+    const sessionBlocks = this.sessionBlocks;
+    this.ingestSession = null;
+    this.sessionBlocks = [];
+    const { snapshot: rebuilt } = await this.rebuildSnapshot(bestHeight);
+    const incrementalDigest = snapshotDigest(
+      normalizeProtocolSnapshotForComparison(incrementalSnapshot)
+    );
+    const rebuiltDigest = snapshotDigest(normalizeProtocolSnapshotForComparison(rebuilt));
+    if (incrementalDigest !== rebuiltDigest) {
+      this.log?.error?.(
+        JSON.stringify({
+          evt: "indexer-incremental-parity-mismatch",
+          indexedHeight: this.manifest.indexedHeight,
+          indexedHash: this.manifest.indexedHash,
+          incrementalDigest,
+          rebuiltDigest
+        })
+      );
+      // Prefer the trusted full rebuild (already installed as the live session).
+      return rebuilt;
+    }
+    // Digests match: keep the cheaper incremental session/result.
+    this.ingestSession = sessionSnapshot;
+    this.sessionBlocks = sessionBlocks;
+    this.lastIngestPath = "incremental";
+    return incrementalSnapshot;
+  }
+
+  // Network metadata block shared by every published snapshot, matching the
+  // shape buildSnapshot(bestHeight, blocks) produces for full rebuilds.
+  buildNetworkMeta(bestHeight) {
+    const storageStatus = this.storage.publicStatus?.() ?? {
+      backend: "custom",
+      productionReady: false
+    };
+    return {
+      chain: this.manifest.chain,
+      source: "persistent-pearl-rpc",
+      bestHeight,
+      startHeight: this.manifest.startHeight,
+      indexedHeight: this.manifest.indexedHeight,
+      indexedHash: this.manifest.indexedHash,
+      blocksStored: this.manifest.blocks.length,
+      reorgCount: this.manifest.reorgCount,
+      lastSyncedAt: this.manifest.lastSyncedAt,
+      persistenceReady: true,
+      productionReady: storageStatus.productionReady === true,
+      storageBackend: storageStatus.backend ?? "custom",
+      storageProductionReady: storageStatus.productionReady === true,
+      warning:
+        storageStatus.productionReady === true
+          ? "Persistent indexer is using production-capable storage. Keep migrations, monitoring, backups, and restore drills current before public launch."
+          : "Persistent local indexer stores canonical raw blocks and derived PRL-20 state, but still needs production DB operations, monitoring, and deployment hardening."
     };
   }
 
@@ -175,6 +578,12 @@ export class PersistentPrl20Indexer {
       for (let height = nextHeight; height <= upperHeight; height += 1) {
         const hash = await this.pearlRpc("getblockhash", [height]);
         const block = await this.pearlRpc("getblock", [hash, 2]);
+        // ITEM 6: advisory getblock-schema compat check on the first block we see
+        // this sync. Surfaces nodeSchema='incompatible' instead of silently
+        // indexing empty blocks; does not alter the ingest below.
+        if (this.nodeSchema === "unknown") {
+          this.checkBlockSchema(block);
+        }
         const previousHash = block.previousblockhash ?? block.previousHash ?? null;
         const tip = this.manifest.blocks.at(-1);
 
@@ -231,41 +640,35 @@ export class PersistentPrl20Indexer {
     this.manifest.lastSyncedAt = this.now();
   }
 
-  async readCanonicalBlocks() {
-    return this.storage.readBlocks(this.manifest.blocks);
-  }
-
-  buildSnapshot(bestHeight, blocks) {
-    const storageStatus = this.storage.publicStatus?.() ?? {
-      backend: "custom",
-      productionReady: false
+  // MoE hard fork advisory status fields, shared by buildStatus and
+  // buildStatusFromSnapshot so /health and /indexer/status expose them
+  // identically. ALL fields are additive/optional and advisory:
+  //   indexerVersion   - this indexer's package version (or null).
+  //   pearlNodeVersion - { raw, semver, meetsMinimum, minimum } | null. Carries
+  //                      only a version string, never host/path.
+  //   checkpoint       - { status, height, expectedHash, observedHash }.
+  //   forkEra          - frozen cross-repo tag, e.g. "moe-v2".
+  //   nodeSchema       - 'compatible' | 'incompatible' | 'unknown'.
+  //   message          - human advisory string, or null when everything is fine.
+  advisoryStatusFields(indexedHeight) {
+    const checkpoint = {
+      status: this.checkpointStatus?.status ?? "unknown",
+      height: this.checkpointStatus?.height ?? null,
+      expectedHash: this.checkpointStatus?.expectedHash ?? null,
+      observedHash: this.checkpointStatus?.observedHash ?? null
     };
-    return withPublishedSnapshotMetadata(ingestPearlBlocksFixture(
-      {
-        network: {
-          chain: this.manifest.chain,
-          source: "persistent-pearl-rpc",
-          bestHeight,
-          startHeight: this.manifest.startHeight,
-          indexedHeight: this.manifest.indexedHeight,
-          indexedHash: this.manifest.indexedHash,
-          blocksStored: this.manifest.blocks.length,
-          reorgCount: this.manifest.reorgCount,
-          lastSyncedAt: this.manifest.lastSyncedAt,
-          persistenceReady: true,
-          productionReady: storageStatus.productionReady === true,
-          storageBackend: storageStatus.backend ?? "custom",
-          storageProductionReady: storageStatus.productionReady === true,
-          warning:
-            storageStatus.productionReady === true
-              ? "Persistent indexer is using production-capable storage. Keep migrations, monitoring, backups, and restore drills current before public launch."
-              : "Persistent local indexer stores canonical raw blocks and derived PRL-20 state, but still needs production DB operations, monitoring, and deployment hardening."
-        },
-        prl20MintFee: this.mintFeePolicy,
-        blocks
-      },
-      { mintFeePolicy: this.mintFeePolicy }
-    ));
+    return {
+      indexerVersion: this.indexerVersion ?? null,
+      pearlNodeVersion: this.nodeVersion ? { ...this.nodeVersion } : null,
+      checkpoint,
+      forkEra: this.forkEra ?? null,
+      nodeSchema: this.nodeSchema ?? "unknown",
+      message: buildAdvisoryMessage({
+        checkpoint,
+        nodeVersion: this.nodeVersion,
+        nodeSchema: this.nodeSchema
+      })
+    };
   }
 
   buildStatus(bestHeight) {
@@ -287,7 +690,8 @@ export class PersistentPrl20Indexer {
         backend: "custom",
         productionReady: false
       },
-      lastSyncedAt: this.manifest.lastSyncedAt
+      lastSyncedAt: this.manifest.lastSyncedAt,
+      ...this.advisoryStatusFields(indexedHeight)
     };
   }
 
@@ -326,7 +730,8 @@ export class PersistentPrl20Indexer {
         backend: "custom",
         productionReady: false
       },
-      lastSyncedAt: network.lastSyncedAt ?? this.manifest.lastSyncedAt
+      lastSyncedAt: network.lastSyncedAt ?? this.manifest.lastSyncedAt,
+      ...this.advisoryStatusFields(indexedHeight)
     };
   }
 
@@ -419,6 +824,84 @@ function normalizeNonNegativeInteger(value, name) {
     throw new Error(`${name} must be a safe non-negative integer`);
   }
   return number;
+}
+
+// Parse "pearld:MAJOR.MINOR.PATCH" out of a btcd-style subversion string such as
+// "/pearlwire:0.5.0/pearld:1.0.6/" or "/pearld:1.1.0-presync/". Returns
+// { major, minor, patch } or null when no pearld token is present.
+export function parsePearldSemver(subversion) {
+  if (typeof subversion !== "string") {
+    return null;
+  }
+  const match = subversion.match(/pearld:(\d+)\.(\d+)\.(\d+)/);
+  if (!match) {
+    return null;
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3])
+  };
+}
+
+// Compares a parsed { major, minor, patch } against a "x.y.z" minimum string.
+// Returns >0 when version > minimum, 0 when equal, <0 when older.
+export function compareSemver(version, minimumString) {
+  const [minMajor, minMinor, minPatch] = String(minimumString)
+    .split(".")
+    .map((part) => Number(part) || 0);
+  if (version.major !== minMajor) return version.major - minMajor;
+  if (version.minor !== minMinor) return version.minor - minMinor;
+  return version.patch - minPatch;
+}
+
+// ITEM 6: returns true when a `getblock <hash> 2` result has the fields ingest
+// consumes — height/hash/previousblockhash/time and a tx array
+// (rawtx|tx|transactions) whose entries each carry hex (rawTxHex) | txid. An
+// empty tx array is allowed (an empty block is legitimate); a missing tx array
+// or entries lacking both hex and txid mark the schema incompatible.
+export function isCompatibleGetblockSchema(block) {
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return false;
+  }
+  if (block.height === undefined || block.height === null) return false;
+  if (!block.hash) return false;
+  if (block.previousblockhash === undefined && block.previousHash === undefined) return false;
+  if (block.time === undefined && block.blocktime === undefined) return false;
+  const txArray = block.rawtx ?? block.tx ?? block.transactions;
+  if (!Array.isArray(txArray)) {
+    return false;
+  }
+  return txArray.every((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return false;
+    }
+    const hasHex = Boolean(entry.hex ?? entry.rawTxHex);
+    const hasTxid = Boolean(entry.txid ?? entry.hash);
+    return hasHex || hasTxid;
+  });
+}
+
+function safeText(error) {
+  return String(error?.message ?? error ?? "unknown error").slice(0, 200);
+}
+
+// Builds the human advisory `message` for status/health. Priority: a checkpoint
+// mismatch (the indexer is provably on a non-canonical chain) outranks a stale
+// node version, which outranks an incompatible getblock schema. Returns null when
+// none apply. Advisory only — never changes ok/synced semantics.
+function buildAdvisoryMessage({ checkpoint, nodeVersion, nodeSchema }) {
+  if (checkpoint?.status === "mismatch") {
+    const height = checkpoint.height ?? "?";
+    return `Indexer is on a non-canonical chain (checkpoint mismatch at height ${height}). Re-sync against a Pearl node >= v1.1.0 with the MoE hard fork.`;
+  }
+  if (nodeVersion && nodeVersion.meetsMinimum === false) {
+    return "Pearl node predates the MoE hard fork; update pearld to >= v1.1.0.";
+  }
+  if (nodeSchema === "incompatible") {
+    return "Pearl node getblock response is missing fields the indexer needs (rawtx/tx with hex or txid). Update pearld to a MoE-compatible build.";
+  }
+  return null;
 }
 
 function validateManifestContinuity(manifest) {

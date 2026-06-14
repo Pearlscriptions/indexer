@@ -37,7 +37,7 @@ export function loadOperatorMetadata(env = {}) {
   };
 }
 
-export function operatorMetadataDocument(metadata = {}, { chain, version } = {}) {
+export function operatorMetadataDocument(metadata = {}, { chain, version, forkEra } = {}) {
   const safeMetadata = {
     configured: Boolean(metadata.configured),
     name: metadata.name ?? null,
@@ -54,6 +54,10 @@ export function operatorMetadataDocument(metadata = {}, { chain, version } = {})
     configured: safeMetadata.configured,
     chain: chain ?? null,
     version: version ?? null,
+    // MoE hard fork: static, OPTIONAL advisory tag. Older operator self-checks
+    // must still pass validateOperatorMetadataDocument, so this is never required
+    // by the validator and is omitted when not provided.
+    ...(forkEra ? { forkEra } : {}),
     endpoints: OPERATOR_ENDPOINTS,
     operator: {
       name: safeMetadata.name,

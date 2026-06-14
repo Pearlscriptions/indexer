@@ -58,8 +58,9 @@ test("persistent indexer backfills once, stores blocks, and reloads from disk", 
   assert.equal(second.snapshot.token.mintCount, 1);
   assert.equal(second.status.blocksStored, 2);
   assert.deepEqual(
+    // getnetworkinfo is the advisory MoE node-version probe run every sync.
     reloadedCalls.map((call) => call[0]),
-    ["getblockcount", "getblockhash"]
+    ["getblockcount", "getblockhash", "getnetworkinfo"]
   );
   assert.ok(calls.some((call) => call[0] === "getblock"));
 });
@@ -237,7 +238,11 @@ test("postgres persistent indexer reuses stored snapshots when already synced", 
   });
 
   const first = await indexer.syncToTip();
-  assert.equal(first.blocks.length, 1);
+  // Full rebuilds no longer return the whole raw-block history (bounded-memory
+  // chunked rebuild); they report a blockCount instead. The appended-blocks fast
+  // path still returns its small slice in .blocks.
+  assert.equal(first.blockCount, 1);
+  assert.equal(first.blocks.length, 0);
   assert.equal(first.snapshot.token.deployed, true);
 
   pool.queries = [];
@@ -248,8 +253,9 @@ test("postgres persistent indexer reuses stored snapshots when already synced", 
   assert.equal(second.snapshot.token.deployed, true);
   assert.equal(second.snapshot.network.indexedHeight, 1);
   assert.deepEqual(
+    // getnetworkinfo is the advisory MoE node-version probe run every sync.
     calls.map((call) => call[0]),
-    ["getblockcount", "getblockhash"]
+    ["getblockcount", "getblockhash", "getnetworkinfo"]
   );
   assert.equal(
     pool.queries.some((query) => query.startsWith("SELECT raw_json FROM chain_blocks")),
@@ -775,9 +781,17 @@ test("persistent indexer rolls back PRL-20 transfer-lot fills and protected UTXO
   assert.equal(aliceTransferUtxo?.transferLotId, transferLotId);
 });
 
-function makeRpc(blocks, calls = []) {
+function makeRpc(blocks, calls = [], options = {}) {
   const byHeight = new Map(blocks.map((item) => [item.height, item]));
   const byHash = new Map(blocks.map((item) => [item.hash, item]));
+  // MoE node-version probe support. Defaults to a post-fork node so the advisory
+  // probe succeeds; pass networkInfo:null to simulate getnetworkinfo being absent
+  // (the sync must still complete), or a custom object to drive version parsing.
+  const hasNetworkInfo = !("networkInfo" in options) || options.networkInfo !== undefined;
+  const networkInfo =
+    "networkInfo" in options
+      ? options.networkInfo
+      : { subversion: "/pearlwire:0.5.0/pearld:1.1.0/", version: 1010000 };
   return async (method, params = []) => {
     calls.push([method, params]);
     if (method === "getblockcount") {
@@ -792,6 +806,12 @@ function makeRpc(blocks, calls = []) {
       const block = byHash.get(params[0]);
       assert.ok(block, `missing block hash ${params[0]}`);
       return block;
+    }
+    if (method === "getnetworkinfo") {
+      if (!hasNetworkInfo) {
+        throw new Error("Method not found");
+      }
+      return networkInfo;
     }
     throw new Error(`unexpected RPC method ${method}`);
   };

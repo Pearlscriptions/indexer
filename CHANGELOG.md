@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.2.1 - 2026-06-14
+
+Performance/stability + Pearl MoE hard-fork compatibility release. No PRL-20
+consensus or protocol change: the derived snapshot digest stays byte-identical
+for the same chain.
+
+Performance / stability:
+
+- API/worker process split via `PRL20_INDEXER_ROLE` (`all` default keeps the
+  current single-process behavior byte-identical; `api` serves read-only from
+  stored state and never runs chain sync in the request/event loop; `worker` is
+  a dedicated sync loop, see `indexer:api` / `indexer:worker` scripts).
+- Incremental ingest: each new block is applied O(block) instead of re-folding
+  PRL-20 state from genesis on every sync. Proven digest-identical to a full
+  re-fold (full fold, split-publish, reorg, and chunked rebuild all match).
+- Bounded-memory cold-start rebuild: the canonical chain is read and folded in
+  chunks (`PRL20_INDEXER_REBUILD_CHUNK_SIZE`, default 250) instead of loading
+  the entire raw-block history into RAM at once.
+
+MoE hard-fork node compatibility (advisory only — never alters PRL-20 state):
+
+- Requires `pearld >= v1.1.0` (MoE hard fork activated 2026-06-12). Operators on
+  a stale/non-canonical chain are detected and surfaced, not silently indexed.
+- `canonicalCheckpoints` (+ `forkEra: "moe-v2"`) in the release manifest;
+  pearl-mainnet fails fast at startup until a real post-fork `{height, hash}` is
+  filled in (ships with a `FILL_...` placeholder).
+- New advisory status fields on `/health`, `/indexer/status`, `/indexer/digest`
+  and a static `forkEra` on `/operator`: `indexerVersion`, `pearlNodeVersion`,
+  `checkpoint` (`status` ∈ match|mismatch|unknown), `forkEra`, `nodeSchema`, and
+  a human `message`/`warning`. `/health.ok` stays `true` on mismatch.
+- `registry:check` reference states `CANONICAL_CHECKPOINT_MISMATCH`,
+  `NEEDS_UPDATE`, `NODE_VERSION_TOO_OLD` (distinct from generic chain mismatch).
+- `getblock` schema safety net flags `nodeSchema: incompatible` instead of
+  indexing empty blocks if a future node changes the consumed fields.
+
+Security boundary:
+
+This release keeps the public indexer read-only and does not add wallet signing,
+transaction broadcast, marketplace settlement, registry backend mutation, or
+rewards logic. All new fields are additive, advisory, and excluded from the
+protocol snapshot digest.
+
 ## v1.1.2 - 2026-05-29
 
 Operator worker split hardening release.

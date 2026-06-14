@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <code>v1.1.2</code>
+  <code>v1.2.1</code>
   ·
   <code>node >=22</code>
   ·
@@ -36,7 +36,7 @@
 
 <p align="center">
   Run your own Pearl-backed indexer, reproduce canonical inscription numbers,
-  derive PRL-20 state, and compare deterministic digests with other v1.1.2
+  derive PRL-20 state, and compare deterministic digests with other v1.2.1
   operators.
 </p>
 
@@ -51,16 +51,20 @@ trading APIs.
 The official Pearlscriptions marketplace is an application layer built on top of
 transfer lots. It is not part of this public indexer release.
 
-The `v1.1.2` release keeps the public indexer read-only and adds optional
+The `v1.2.1` release keeps the public indexer read-only and adds optional
 operator metadata for the Pearlscriptions operator registry. Registration,
 monitoring, scoring, and rewards remain official application-layer services
 outside this repository.
 
-This patch release hardens operator registry checks by serving digest metadata
-from the published snapshot, using live no-store headers for registry-critical
-state, making Postgres snapshot updates safer under sync, and supporting a
-separate public API process plus private sync worker for steadier registry
-health checks.
+The `v1.2.1` release adds Pearl **MoE hard-fork** node compatibility (requires
+`pearld >= v1.1.0`, activated 2026-06-12) and three performance/stability
+improvements: an API/worker process split (`PRL20_INDEXER_ROLE`), incremental
+ingest (each new block is O(block) instead of a full re-fold), and a
+bounded-memory cold-start rebuild. It also surfaces advisory chain-canonicality
+status (`canonicalCheckpoints`, node version, `forkEra`). None of this changes
+PRL-20 consensus: the derived snapshot digest is byte-identical for the same
+chain. See [docs/api-contract.md](docs/api-contract.md) for the new advisory
+status fields and [CHANGELOG.md](CHANGELOG.md) for details.
 
 <table>
   <tr>

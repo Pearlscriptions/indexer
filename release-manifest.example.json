@@ -2,6 +2,13 @@
   "schema": "pearlscriptions-release-manifest-v1",
   "network": "pearl-mainnet",
   "protocol": "prl-20-v0",
+  "forkEra": "moe-v2",
+  "canonicalCheckpoints": [
+    {
+      "height": 72639,
+      "hash": "f51cb2da919ef81da5eb8004b8a2280abb415ef4ab692deb60f28f90671168b1"
+    }
+  ],
   "prls": {
     "tick": "prls",
     "max": "2100000000",

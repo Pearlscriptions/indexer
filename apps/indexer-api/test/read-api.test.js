@@ -49,10 +49,13 @@ test("config loader reads local env files without overriding explicit environmen
   assert.equal(explicit.port, 3001);
 });
 
-test("config loader resolves the root release manifest from workspace scripts", () => {
-  const config = loadPublicIndexerConfig({});
+test("config loader resolves the root release manifest mint fee on non-mainnet", () => {
+  // The shipped example manifest carries a real public checkpoint. This case
+  // verifies the manifest still resolves the canonical PRLS mint-fee policy on a
+  // non-mainnet chain.
+  const config = loadPublicIndexerConfig({ PRL20_CHAIN: "pearl-simnet" }, { loadEnvFile: false });
 
-  assert.equal(config.chain, "pearl-mainnet");
+  assert.equal(config.chain, "pearl-simnet");
   assert.equal(
     config.mintFeePolicy.address,
     "prl1ppmla838yflfcsm5vr6lfgvfclf4fgn3puja70cke4wqqkl6vflaq3cn7ea"
@@ -61,6 +64,8 @@ test("config loader resolves the root release manifest from workspace scripts", 
     config.mintFeePolicy.scriptPubKey,
     "51200effd3c4e44fd3886e8c1ebe943138fa6a944e21e4bbe7e2d9ab800b7f4c4ffa"
   );
+  assert.equal(config.forkEra, "moe-v2");
+  assert.equal(config.canonicalCheckpoints[0].placeholder, false);
 });
 
 test("operator metadata config validates and normalizes optional public fields", () => {
@@ -119,7 +124,7 @@ test("remote operator metadata validation rejects script-like public fields", ()
     readOnly: true,
     configured: true,
     chain: "pearl-simnet",
-    version: "1.1.2",
+    version: "1.2.1",
     endpoints: {
       health: "/health",
       status: "/indexer/status",
@@ -200,7 +205,7 @@ test("public read API exposes health and digest without opening mutation methods
   const health = await invoke(handler, "GET", "/health");
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
-  assert.equal(health.body.version, "1.1.2");
+  assert.equal(health.body.version, "1.2.1");
   assert.equal(health.body.readOnly, true);
   assert.equal(health.body.indexer.mode, "fixture");
   assert.equal(health.body.indexer.storeDir, undefined);
@@ -318,7 +323,7 @@ test("public digest ignores operator-local network telemetry", async () => {
     getStatus: async () => ({ mode: "test" }),
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.1.2"
+    version: "1.2.1"
   });
 
   const response = await invoke(handler, "GET", "/indexer/digest");
@@ -364,7 +369,7 @@ test("public digest can use precomputed published metadata without loading full 
     },
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.1.2"
+    version: "1.2.1"
   });
 
   const response = await invoke(handler, "GET", "/indexer/digest");
@@ -408,7 +413,7 @@ test("operator metadata routes expose configured safe metadata", async () => {
   assert.equal(operator.body.schema, "pearlscriptions-indexer-operator-v1");
   assert.equal(operator.body.readOnly, true);
   assert.equal(operator.body.configured, true);
-  assert.equal(operator.body.version, "1.1.2");
+  assert.equal(operator.body.version, "1.2.1");
   assert.deepEqual(operator.body.endpoints, {
     health: "/health",
     status: "/indexer/status",

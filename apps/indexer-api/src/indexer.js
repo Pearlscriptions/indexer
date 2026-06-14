@@ -27,18 +27,34 @@ export function loadFixture(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-export function ingestPearlBlocksFixture(fixture, options = {}) {
+// PRL-20 ingest session.
+//
+// Holds the forward-only fold accumulators (PRL-20 state, inscription records,
+// and the transaction index) alive between applyBlock() calls so each new
+// canonical block costs O(block) instead of forcing an O(history) rebuild from
+// genesis. Blocks MUST be applied in strictly increasing, contiguous canonical
+// order (the same order ingestPearlBlocksFixture sorts them into) for the result
+// to stay digest-identical to a full rebuild. Reorg safety is the caller's job:
+// on any rollback the caller must discard the session and rebuild from the
+// canonical block set (see persistent-indexer.js rebuildSnapshot).
+export function createPrl20IngestSession(options = {}) {
+  const mintFeePolicy = normalizeMintFeePolicy(options.mintFeePolicy ?? {});
   let state = createPrl20State();
   const inscriptionsById = new Map();
-  const mintFeePolicy = normalizeMintFeePolicy(
-    options.mintFeePolicy ?? fixture.prl20MintFee ?? fixture.network?.prl20MintFee
-  );
-  const blocks = [...(fixture.blocks ?? [])].sort((a, b) => a.height - b.height);
+  // Publish-time projections fold over these maps; growing them per block keeps
+  // buildSnapshot a O(state) projection rather than an O(history) rebuild.
+  const txStatus = {};
+  const addressToScriptPubKey = {};
+  const transactions = [];
+  const outputsByOutpoint = {};
+  const spendsByOutpoint = {};
 
-  for (const block of blocks) {
-    const transactions = normalizeBlockTransactions(block);
-    for (let txIndex = 0; txIndex < transactions.length; txIndex += 1) {
-      const tx = transactions[txIndex];
+  function applyBlock(block) {
+    const transactionList = normalizeBlockTransactions(block);
+    for (let txIndex = 0; txIndex < transactionList.length; txIndex += 1) {
+      const tx = transactionList[txIndex];
+
+      // --- PRL-20 state fold (preserves the historical apply order) ---
       applyTransferLotFillsForTransaction(state, tx, { block, txIndex });
       const mintFeeAllocator = createMintFeeAllocator(tx.outputs ?? [], mintFeePolicy);
       const inscriptions = tx.rawTxHex
@@ -110,10 +126,164 @@ export function ingestPearlBlocksFixture(fixture, options = {}) {
 
         state = applyPrl20Operation(state, parsed.operation, context).state;
       }
+
+      // --- Transaction-index fold (mirrors the legacy buildTransactionIndex
+      // inner body plus the txStatus / addressToScriptPubKey loop that the old
+      // buildSnapshot recomputed from fixture.blocks). Applied in canonical
+      // order, the produced arrays/maps are byte-identical to a rebuild. ---
+      indexTransaction({ block, tx, txIndex });
     }
   }
 
-  return buildSnapshot(state, fixture, mintFeePolicy, [...inscriptionsById.values()]);
+  function indexTransaction({ block, tx, txIndex }) {
+    txStatus[tx.txid] = {
+      txid: tx.txid,
+      status: "confirmed",
+      blockHeight: block.height
+    };
+    for (const output of tx.outputs ?? []) {
+      if (output.address && output.scriptPubKey) {
+        addressToScriptPubKey[output.address] = output.scriptPubKey;
+      }
+    }
+
+    const inputs = normalizeTransactionInputs(tx);
+    const outputs = normalizeTransactionOutputs(tx);
+    const coinbase = Boolean(tx.coinbase) || inputs.some((input) => input.coinbase !== undefined);
+    const transaction = {
+      txid: tx.txid,
+      blockHeight: block.height ?? null,
+      blockHash: block.hash ?? null,
+      txIndex,
+      order: transactionOrder(block.height, txIndex),
+      coinbase,
+      inputs,
+      outputs,
+      inscriptionTransfers: normalizeInscriptionTransfers(tx),
+      inscriptionTransferOutputIndex:
+        tx.inscriptionTransferOutputIndex === null || tx.inscriptionTransferOutputIndex === undefined
+          ? null
+          : Number(tx.inscriptionTransferOutputIndex),
+      inscriptionOwnerOutputIndex:
+        tx.inscriptionOwnerOutputIndex === null || tx.inscriptionOwnerOutputIndex === undefined
+          ? null
+          : Number(tx.inscriptionOwnerOutputIndex)
+    };
+    transactions.push(transaction);
+
+    for (const output of outputs) {
+      outputsByOutpoint[`${tx.txid}:${output.index}`] = {
+        txid: tx.txid,
+        vout: output.index,
+        blockHeight: block.height ?? null,
+        txIndex,
+        order: transaction.order,
+        address: output.address ?? null,
+        scriptPubKey: output.scriptPubKey ?? null,
+        valueGrain: output.valueGrain ?? "0",
+        valuePrl: output.valuePrl ?? grainToPrl(output.valueGrain ?? "0"),
+        coinbase
+      };
+    }
+
+    for (const input of inputs) {
+      if (!input.previousOutpoint || spendsByOutpoint[input.previousOutpoint]) {
+        continue;
+      }
+      spendsByOutpoint[input.previousOutpoint] = {
+        outpoint: input.previousOutpoint,
+        txid: tx.txid,
+        inputIndex: input.inputIndex,
+        blockHeight: block.height ?? null,
+        txIndex,
+        order: transaction.order,
+        inputs,
+        outputs,
+        inscriptionTransfers: transaction.inscriptionTransfers,
+        inscriptionTransferOutputIndex: transaction.inscriptionTransferOutputIndex,
+        inscriptionOwnerOutputIndex: transaction.inscriptionOwnerOutputIndex
+      };
+    }
+  }
+
+  function buildSnapshot(networkMeta = {}) {
+    const { network, prlBalances, utxos } = normalizeFixtureLikeNetworkMeta(networkMeta);
+    return assembleSnapshot({
+      state,
+      mintFeePolicy,
+      // Clone inscription records at publish: applyCurrentInscriptionLocations
+      // (and downstream projections) mutate locationHistory / firstMove /
+      // current* fields directly on them. Cloning keeps the accumulator records
+      // pristine so a second buildSnapshot() on the same live session stays
+      // deterministic (and digest-identical to a full re-fold).
+      inscriptions: [...inscriptionsById.values()].map(cloneInscriptionRecord),
+      txStatus: { ...txStatus },
+      addressToScriptPubKey: { ...addressToScriptPubKey },
+      transactions,
+      outputsByOutpoint,
+      spendsByOutpoint,
+      network,
+      prlBalances,
+      utxos
+    });
+  }
+
+  return {
+    applyBlock,
+    buildSnapshot,
+    get state() {
+      return state;
+    },
+    get inscriptionCount() {
+      return inscriptionsById.size;
+    }
+  };
+}
+
+export function ingestPearlBlocksFixture(fixture, options = {}) {
+  const mintFeePolicy = normalizeMintFeePolicy(
+    options.mintFeePolicy ?? fixture.prl20MintFee ?? fixture.network?.prl20MintFee
+  );
+  const session = createPrl20IngestSession({ mintFeePolicy });
+  const blocks = [...(fixture.blocks ?? [])].sort((a, b) => a.height - b.height);
+  for (const block of blocks) {
+    session.applyBlock(block);
+  }
+  return session.buildSnapshot({
+    network: fixture.network ?? { chain: "pearl-mock" },
+    prlBalances: fixture.prlBalances ?? {},
+    utxos: fixture.utxos ?? null
+  });
+}
+
+// Accepts either a structured { network, prlBalances, utxos } meta object or a
+// bare network object (back-compat with callers passing fixture.network alone).
+function normalizeFixtureLikeNetworkMeta(meta = {}) {
+  const hasStructuredShape =
+    meta &&
+    typeof meta === "object" &&
+    ("network" in meta || "prlBalances" in meta || "utxos" in meta);
+  if (hasStructuredShape) {
+    return {
+      network: meta.network ?? { chain: "pearl-mock" },
+      prlBalances: meta.prlBalances ?? {},
+      utxos: meta.utxos ?? null
+    };
+  }
+  return {
+    network: meta && typeof meta === "object" ? meta : { chain: "pearl-mock" },
+    prlBalances: {},
+    utxos: null
+  };
+}
+
+function cloneInscriptionRecord(record) {
+  // Shallow clone is sufficient: buildInscriptionRecord produces flat records and
+  // the publish-time mutators REPLACE (never deep-mutate) array/object fields —
+  // applyCurrentInscriptionLocations assigns a fresh locationHistory array and a
+  // fresh firstMove object, so the clone never shares mutable structure with the
+  // accumulator copy.
+  return { ...record };
 }
 
 export function findMintFeePayment(outputs, policy = PRLS_MINT_FEE_POLICY) {
@@ -1055,29 +1225,27 @@ export function routeSnapshot(snapshot, method, path) {
   return json(404, { ok: false, error: "NOT_FOUND" });
 }
 
-function buildSnapshot(state, fixture, mintFeePolicy = PRLS_MINT_FEE_POLICY, inscriptions = []) {
-  const addressToScriptPubKey = {};
-  const txStatus = {};
-  const txIndex = buildTransactionIndex(fixture);
-
-  for (const block of fixture.blocks ?? []) {
-    for (const tx of normalizeBlockTransactions(block)) {
-      txStatus[tx.txid] = {
-        txid: tx.txid,
-        status: "confirmed",
-        blockHeight: block.height
-      };
-      for (const output of tx.outputs ?? []) {
-        if (output.address && output.scriptPubKey) {
-          addressToScriptPubKey[output.address] = output.scriptPubKey;
-        }
-      }
-    }
-  }
-
+// Pure publish-time projection: assembles the public snapshot from already-built
+// fold accumulators. Every step here is O(state) (inscriptions / transactions /
+// outputs), never an O(history) re-fold over raw blocks. The txStatus and
+// addressToScriptPubKey maps are folded per block by the ingest session, so this
+// no longer re-walks fixture.blocks the way the legacy buildSnapshot did.
+function assembleSnapshot({
+  state,
+  mintFeePolicy = PRLS_MINT_FEE_POLICY,
+  inscriptions = [],
+  txStatus = {},
+  addressToScriptPubKey = {},
+  transactions = [],
+  outputsByOutpoint = {},
+  spendsByOutpoint = {},
+  network = { chain: "pearl-mock" },
+  prlBalances = {},
+  utxos = null
+}) {
   const snapshot = {
     network: {
-      ...(fixture.network ?? { chain: "pearl-mock" }),
+      ...network,
       prl20MintFee: mintFeePolicy
     },
     state,
@@ -1086,12 +1254,12 @@ function buildSnapshot(state, fixture, mintFeePolicy = PRLS_MINT_FEE_POLICY, ins
     tokens: [],
     operations: state.operations,
     addressToScriptPubKey,
-    prlBalances: fixture.prlBalances ?? {},
-    utxos: fixture.utxos ?? null,
+    prlBalances,
+    utxos,
     txStatus,
-    transactions: txIndex.transactions,
-    outputsByOutpoint: txIndex.outputsByOutpoint,
-    spendsByOutpoint: txIndex.spendsByOutpoint
+    transactions,
+    outputsByOutpoint,
+    spendsByOutpoint
   };
   applyCurrentInscriptionLocations(snapshot);
   snapshot.transferLots = buildTransferLotSnapshot(snapshot);
@@ -1163,79 +1331,6 @@ function publicOperationRecord(operation) {
     mintFeeAddress: operation.mintFeeAddress ?? null,
     mintFeeScriptPubKey: operation.mintFeeScriptPubKey ?? null
   };
-}
-
-function buildTransactionIndex(fixture) {
-  const transactions = [];
-  const outputsByOutpoint = {};
-  const spendsByOutpoint = {};
-  const blocks = [...(fixture.blocks ?? [])].sort((a, b) => Number(a.height ?? 0) - Number(b.height ?? 0));
-
-  for (const block of blocks) {
-    const blockTransactions = normalizeBlockTransactions(block);
-    for (let txIndex = 0; txIndex < blockTransactions.length; txIndex += 1) {
-      const tx = blockTransactions[txIndex];
-      const inputs = normalizeTransactionInputs(tx);
-      const outputs = normalizeTransactionOutputs(tx);
-      const coinbase = Boolean(tx.coinbase) || inputs.some((input) => input.coinbase !== undefined);
-      const transaction = {
-        txid: tx.txid,
-        blockHeight: block.height ?? null,
-        blockHash: block.hash ?? null,
-        txIndex,
-        order: transactionOrder(block.height, txIndex),
-        coinbase,
-        inputs,
-        outputs,
-        inscriptionTransfers: normalizeInscriptionTransfers(tx),
-        inscriptionTransferOutputIndex:
-          tx.inscriptionTransferOutputIndex === null || tx.inscriptionTransferOutputIndex === undefined
-            ? null
-            : Number(tx.inscriptionTransferOutputIndex),
-        inscriptionOwnerOutputIndex:
-          tx.inscriptionOwnerOutputIndex === null || tx.inscriptionOwnerOutputIndex === undefined
-            ? null
-            : Number(tx.inscriptionOwnerOutputIndex)
-      };
-      transactions.push(transaction);
-
-      for (const output of outputs) {
-        outputsByOutpoint[`${tx.txid}:${output.index}`] = {
-          txid: tx.txid,
-          vout: output.index,
-          blockHeight: block.height ?? null,
-          txIndex,
-          order: transaction.order,
-          address: output.address ?? null,
-          scriptPubKey: output.scriptPubKey ?? null,
-          valueGrain: output.valueGrain ?? "0",
-          valuePrl: output.valuePrl ?? grainToPrl(output.valueGrain ?? "0"),
-          coinbase
-        };
-      }
-
-      for (const input of inputs) {
-        if (!input.previousOutpoint || spendsByOutpoint[input.previousOutpoint]) {
-          continue;
-        }
-        spendsByOutpoint[input.previousOutpoint] = {
-          outpoint: input.previousOutpoint,
-          txid: tx.txid,
-          inputIndex: input.inputIndex,
-          blockHeight: block.height ?? null,
-          txIndex,
-          order: transaction.order,
-          inputs,
-          outputs,
-          inscriptionTransfers: transaction.inscriptionTransfers,
-          inscriptionTransferOutputIndex: transaction.inscriptionTransferOutputIndex,
-          inscriptionOwnerOutputIndex: transaction.inscriptionOwnerOutputIndex
-        };
-      }
-    }
-  }
-
-  return { transactions, outputsByOutpoint, spendsByOutpoint };
 }
 
 function applyCurrentInscriptionLocations(snapshot) {

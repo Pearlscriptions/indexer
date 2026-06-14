@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fileURLToPath } from "node:url";
 import { loadPublicIndexerConfig } from "./config.js";
 import { operatorMetadataDocument, validateOperatorMetadataDocument } from "./operator-metadata.js";
 import { createReadOnlyApi } from "./read-api.js";
@@ -10,7 +11,6 @@ import {
 } from "./snapshot-compare.js";
 import { createPublicIndexerRuntime, startServer } from "./server.js";
 
-const command = process.argv[2] ?? "help";
 const REGISTRY_CHECK_PATHS = [
   "/health",
   "/indexer/status",
@@ -19,7 +19,8 @@ const REGISTRY_CHECK_PATHS = [
   "/.well-known/pearlscriptions-indexer.json"
 ];
 
-try {
+export async function runCli(argv = process.argv) {
+  const command = argv[2] ?? "help";
   if (command === "serve") {
     const { config } = await startServer(loadPublicIndexerConfig());
     process.stdout.write(`Pearlscriptions read-only indexer listening on ${config.host}:${config.port}\n`);
@@ -37,6 +38,8 @@ try {
       status: sanitize(result.status),
       summary: summarizeSnapshot(result.snapshot)
     });
+  } else if (command === "worker") {
+    await runWorker();
   } else if (command === "status") {
     const runtime = await createPublicIndexerRuntime({
       ...loadPublicIndexerConfig(),
@@ -57,13 +60,88 @@ try {
       summary: summarizeSnapshot(normalized)
     });
   } else if (command === "registry:check") {
-    writeJson(await registryCheck(loadPublicIndexerConfig(), parseCliOptions(process.argv.slice(3))));
+    writeJson(await registryCheck(loadPublicIndexerConfig(), parseCliOptions(argv.slice(3))));
   } else {
-    process.stdout.write(`Usage: node src/cli.js <serve|sync|status|digest|registry:check>\n`);
+    process.stdout.write(
+      `Usage: node src/cli.js <serve|sync|worker|status|digest|registry:check>\n`
+    );
   }
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
+}
+
+// Dedicated background-sync worker process (Fix A: API/worker split).
+//
+// Loads the runtime, then drives the sync loop via runWorkerLoop. The worker is
+// intended to be the SOLE snapshot writer; api-role HTTP processes only read
+// storage.readSnapshot().
+async function runWorker(options = {}) {
+  const config = loadPublicIndexerConfig();
+  const runtime = await createPublicIndexerRuntime({ ...config, syncOnStart: false });
+  if (!runtime.indexer) {
+    throw new Error("worker requires PEARL_RPC_URL");
+  }
+  return runWorkerLoop(runtime.indexer, config, options);
+}
+
+// Testable worker loop core: loops syncToTip() every config.backgroundSyncMs,
+// reusing the same one-shot sync body as the `sync` command.
+//
+// Cross-process safety relies on storage.withSyncLock (a Postgres advisory lock,
+// applied inside syncToTip via withStorageSyncLock). SYNC_LOCK_BUSY means another
+// sync holds the lock, so this tick is skipped as benign. NOTE: the json-file
+// storage backend has no withSyncLock, so a multi-process split needs Postgres
+// (or exactly one writer); running two json-file workers/writers is unsafe.
+export async function runWorkerLoop(indexer, config, options = {}) {
+  const intervalMs = config.backgroundSyncMs > 0 ? config.backgroundSyncMs : 30_000;
+  const maxIterations = options.maxIterations ?? Infinity;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const onTick = options.onTick ?? writeJson;
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+  };
+  if (options.registerSignals !== false) {
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  }
+
+  process.stdout.write(
+    `Pearlscriptions indexer worker syncing ${config.chain} every ${intervalMs}ms\n`
+  );
+
+  let iterations = 0;
+  for (let iteration = 0; iteration < maxIterations && !stopped; iteration += 1) {
+    iterations += 1;
+    try {
+      const result = await indexer.syncToTip();
+      onTick({
+        ok: true,
+        evt: "indexer-worker-sync",
+        ingestPath: indexer.lastIngestPath,
+        status: sanitize(result.status)
+      });
+    } catch (error) {
+      if (error?.code === "SYNC_LOCK_BUSY") {
+        // Another sync (or another worker) holds the advisory lock; skip this
+        // tick. This is benign under the single-writer contract.
+        onTick({ ok: true, evt: "indexer-worker-skip", reason: "SYNC_LOCK_BUSY" });
+      } else {
+        process.stderr.write(
+          `[pearlscriptions-indexer] worker sync failed: ${safeErrorMessage(error)}\n`
+        );
+      }
+    }
+    if (iteration + 1 < maxIterations && !stopped) {
+      await sleep(intervalMs);
+    }
+  }
+  return { stopped, iterations };
+}
+
+function safeErrorMessage(error) {
+  return String(error?.message ?? error ?? "unknown error").replace(
+    /postgres:\/\/[^@\s]+@/gi,
+    "postgres://<redacted>@"
+  );
 }
 
 async function registryCheck(config, options) {
@@ -72,7 +150,8 @@ async function registryCheck(config, options) {
   let readiness = null;
   const metadataDocument = operatorMetadataDocument(config.operator, {
     chain: config.chain,
-    version: config.version
+    version: config.version,
+    forkEra: config.forkEra
   });
   const metadataErrors = validateOperatorMetadataDocument(metadataDocument);
   checks.push({
@@ -111,7 +190,8 @@ async function registryCheck(config, options) {
     chain: config.chain,
     manifestDigest: config.manifestDigest,
     version: config.version,
-    operatorMetadata: config.operator
+    operatorMetadata: config.operator,
+    forkEra: config.forkEra
   });
   const results = new Map();
   for (const path of REGISTRY_CHECK_PATHS) {
@@ -184,7 +264,9 @@ function summarizeRegistryCheck(mode, targetUrl, checks, warnings, readiness = n
   };
 }
 
-function buildRegistryReadiness(results, config, targetUrl = null) {
+// Exported for tests: this readiness derivation is the reference spec the
+// private registry repo mirrors (including the MoE reference states below).
+export function buildRegistryReadiness(results, config, targetUrl = null) {
   const health = results.get("/health")?.body ?? null;
   const status = results.get("/indexer/status")?.body ?? null;
   const digest = results.get("/indexer/digest")?.body ?? null;
@@ -268,6 +350,36 @@ function buildRegistryReadiness(results, config, targetUrl = null) {
     errors.push("STATUS_DIGEST_NOT_MATCHING");
   }
 
+  // MoE hard fork reference states (this file is the spec the private registry
+  // checker mirrors). Derived from the new advisory status/digest fields and kept
+  // DISTINCT from the generic STATUS_/DIGEST_CHAIN_MISMATCH states above:
+  //   CANONICAL_CHECKPOINT_MISMATCH - checkpoint.status === 'mismatch' (the
+  //       indexer is provably on a non-canonical chain).
+  //   NEEDS_UPDATE - checkpoint.status === 'unknown' AND indexedHeight is still
+  //       below the lowest configured post-fork checkpoint height (not yet caught
+  //       up far enough to confirm the canonical chain).
+  //   NODE_VERSION_TOO_OLD - the pearld node reports a version below v1.1.0.
+  const checkpoint = status?.checkpoint ?? digest?.checkpoint ?? null;
+  const nodeVersion = status?.pearlNodeVersion ?? health?.pearlNodeVersion ?? null;
+  const forkCheckpointHeight = lowestConfiguredCheckpointHeight(config.canonicalCheckpoints);
+  const forkStates = [];
+  if (checkpoint?.status === "mismatch") {
+    forkStates.push("CANONICAL_CHECKPOINT_MISMATCH");
+  }
+  if (
+    !fixtureMode &&
+    checkpoint?.status === "unknown" &&
+    forkCheckpointHeight !== null &&
+    statusHeight !== null &&
+    statusHeight < forkCheckpointHeight
+  ) {
+    forkStates.push("NEEDS_UPDATE");
+  }
+  if (nodeVersion && nodeVersion.meetsMinimum === false) {
+    forkStates.push("NODE_VERSION_TOO_OLD");
+  }
+  errors.push(...forkStates);
+
   return {
     registryReady: endpointOk && operatorDocReady && errors.length === 0,
     endpointOk,
@@ -280,8 +392,23 @@ function buildRegistryReadiness(results, config, targetUrl = null) {
     digestHeight,
     synced: status?.synced ?? null,
     digestMatchesStatus,
+    // MoE hard fork advisory summary for the private classifier.
+    forkEra: status?.forkEra ?? digest?.forkEra ?? operator?.forkEra ?? config.forkEra ?? null,
+    checkpointStatus: checkpoint?.status ?? null,
+    nodeVersionMeetsMinimum: nodeVersion?.meetsMinimum ?? null,
+    forkStates,
     errors
   };
+}
+
+// Lowest non-placeholder checkpoint height from config (the post-fork checkpoint
+// the NEEDS_UPDATE state compares against). Returns null when none configured.
+function lowestConfiguredCheckpointHeight(canonicalCheckpoints) {
+  const heights = (canonicalCheckpoints ?? [])
+    .filter((checkpoint) => checkpoint && !checkpoint.placeholder)
+    .map((checkpoint) => Number(checkpoint.height))
+    .filter((height) => Number.isInteger(height));
+  return heights.length > 0 ? Math.min(...heights) : null;
 }
 
 function numberOrNull(value) {
@@ -371,4 +498,14 @@ function sanitize(status) {
     delete cleaned.storage.storeDir;
   }
   return cleaned;
+}
+
+// Only dispatch when invoked directly (node src/cli.js <command>). Guarding on
+// the main-module check keeps importing this file for tests side-effect free
+// while preserving the spawn-as-subprocess CLI behavior.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  runCli(process.argv).catch((error) => {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  });
 }

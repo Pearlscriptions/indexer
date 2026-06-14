@@ -6,6 +6,36 @@ The official Pearlscriptions marketplace is an application layer built on top of
 
 The server accepts `GET` requests only. Any `POST`, `PUT`, `PATCH`, or `DELETE` request returns `405 METHOD_NOT_ALLOWED`. It never accepts wallet seeds, private keys, WIFs, mnemonics, RPC passwords, or signing material.
 
+## MoE Hard-Fork Advisory Fields (v1.2.1)
+
+Since the Pearl MoE hard fork (`pearld >= v1.1.0`, activated 2026-06-12) the API
+exposes advisory chain-canonicality fields. They are **additive, optional, and
+read-only**, never alter PRL-20 state, and are **excluded from the protocol
+snapshot digest** (the digest stays byte-identical for the same chain). These
+field names and enums are a frozen contract shared with the operator registry
+checker.
+
+On `/health` and `/indexer/status`:
+
+- `indexerVersion`: string or `null`.
+- `pearlNodeVersion`: `{ raw, semver: {major,minor,patch}|null, meetsMinimum: boolean|null, minimum: "1.1.0" }` or `null`. Best-effort from the node's `getnetworkinfo`; carries only a version string, never a host or path.
+- `checkpoint`: `{ status, height, expectedHash, observedHash }` where `status ∈ { "match", "mismatch", "unknown" }`. `mismatch` means the node is on a stale/non-canonical chain; `unknown` means no applicable checkpoint yet (e.g. not synced past it, or unconfigured).
+- `forkEra`: `"moe-v2"`.
+- `nodeSchema`: `"compatible" | "incompatible" | "unknown"` (the `getblock` schema safety net).
+- `message` (on `/indexer/status`) / `warning` (on `/health`, present only when non-null): a human advisory string. `/health.ok` stays `true` even on mismatch — it is advisory, not an availability failure.
+
+On `/indexer/digest`: `checkpoint`, `forkEra`, and `pearlNodeVersion` are exposed
+as **sibling** keys and are explicitly not part of the hashed snapshot digest.
+
+On `/operator`: a static `forkEra: "moe-v2"` (optional; omitted when unset). No
+other advisory field is added there, to keep operator-document validation
+backward compatible.
+
+Release manifest: `canonicalCheckpoints: [{ height, hash }]` and `forkEra`. On
+`pearl-mainnet` at least one non-placeholder checkpoint is required and the
+service fails fast at startup until a real post-fork `{height, hash}` from a
+`pearld >= v1.1.0` node is provided.
+
 ## Health
 
 ### `GET /health`

@@ -4,6 +4,14 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PRLS } from "../../../packages/prl20-core/src/index.js";
 import { loadOperatorMetadata } from "./operator-metadata.js";
+import { assertHash } from "./storage.js";
+
+// MoE hard fork (advisory node-compat). The placeholder hash is shipped in the
+// example manifest so operators can see the shape; it is treated as
+// "unconfigured" everywhere and rejected on pearl-mainnet (see
+// assertSafeMainnetConfig), mirroring the mint-fee FILL_ placeholder pattern.
+const CANONICAL_CHECKPOINT_PLACEHOLDER = "FILL_POST_FORK_BLOCKHASH_FROM_PEARLD_V1_1_0";
+export const DEFAULT_FORK_ERA = "moe-v2";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(MODULE_DIR, "../../..");
@@ -22,18 +30,35 @@ export function loadPublicIndexerConfig(env = undefined, options = {}) {
   const packageJson = readJsonFile(resolve(REPO_ROOT, "package.json"), {});
   const chain = env.PRL20_CHAIN ?? manifest.network ?? "pearl-mainnet";
   const mintFeePolicy = mintFeePolicyFromManifest(manifest);
+  const canonicalCheckpoints = parseCanonicalCheckpoints(manifest.canonicalCheckpoints);
+  const forkEra = parseForkEra(manifest.forkEra);
 
-  assertSafeMainnetConfig({ chain, manifest, mintFeePolicy });
+  assertSafeMainnetConfig({ chain, manifest, mintFeePolicy, canonicalCheckpoints });
 
   return {
     port: parseInteger(env.PORT, 3000, { min: 1, max: 65_535 }),
     host: env.HOST ?? "127.0.0.1",
+    // Process role for the API/worker split:
+    //   all    (default) - this process both serves the HTTP API and runs the
+    //                      background sync loop. Byte-identical to pre-split
+    //                      behavior for existing single-process operators.
+    //   api             - serve reads only; never sync in-process (no interval,
+    //                      no syncOnStart, no sync-on-cache-miss). Reads the
+    //                      snapshot a separate worker publishes.
+    //   worker          - run only the sync loop (see `cli.js worker`); do not
+    //                      serve HTTP. The sole snapshot writer.
+    role: parseRole(env.PRL20_INDEXER_ROLE),
     chain,
     manifestPath,
     manifest,
     manifestDigest: sha256Json(manifest),
     version: packageJson.version ?? null,
     mintFeePolicy,
+    // MoE hard fork advisory node-compat (cross-repo frozen contract).
+    // canonicalCheckpoints are part of the hashed manifest above, so they also
+    // shift manifestDigest (a second signal for the private registry checker).
+    canonicalCheckpoints,
+    forkEra,
     operator: loadOperatorMetadata(env),
     fixturePath: env.PRL20_FIXTURE_PATH ? resolve(env.PRL20_FIXTURE_PATH) : null,
     pearlRpc: {
@@ -87,7 +112,43 @@ export function mintFeePolicyFromManifest(manifest) {
   };
 }
 
-function assertSafeMainnetConfig({ chain, mintFeePolicy }) {
+// Parse + validate manifest.canonicalCheckpoints into a normalized array of
+// { height, hash, placeholder } pins. height must be a non-negative int; hash is
+// validated as 64-hex via storage.assertHash, EXCEPT the shipped FILL_
+// placeholder which is accepted and flagged placeholder:true (treated as
+// "unconfigured" by the mainnet fail-fast and by checkpoint verification).
+// Defaults to []. Lowercases real hashes so downstream comparisons are uniform.
+export function parseCanonicalCheckpoints(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("canonicalCheckpoints must be an array in PRL20_RELEASE_MANIFEST");
+  }
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`canonicalCheckpoints[${index}] must be an object`);
+    }
+    const height = Number(entry.height);
+    if (!Number.isInteger(height) || height < 0 || !Number.isSafeInteger(height)) {
+      throw new Error(`canonicalCheckpoints[${index}].height must be a safe non-negative integer`);
+    }
+    const rawHash = String(entry.hash ?? "");
+    if (rawHash === CANONICAL_CHECKPOINT_PLACEHOLDER || rawHash.includes("FILL_")) {
+      return { height, hash: rawHash, placeholder: true };
+    }
+    return { height, hash: assertHash(rawHash, `canonicalCheckpoints[${index}].hash`), placeholder: false };
+  });
+}
+
+function parseForkEra(value) {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_FORK_ERA;
+  }
+  return String(value);
+}
+
+function assertSafeMainnetConfig({ chain, mintFeePolicy, canonicalCheckpoints }) {
   if (chain !== "pearl-mainnet") {
     return;
   }
@@ -96,6 +157,17 @@ function assertSafeMainnetConfig({ chain, mintFeePolicy }) {
   if (!address || address.includes("FILL_") || !script || script.includes("FILL_")) {
     throw new Error(
       "pearl-mainnet requires final PRLS mint fee recipient and scriptPubKey in PRL20_RELEASE_MANIFEST"
+    );
+  }
+  // MoE hard fork: pearl-mainnet must ship at least one real post-fork
+  // checkpoint so the indexer can detect a stale/non-canonical chain. Mirror the
+  // mint-fee FILL_ rejection above: empty or any placeholder hash fails fast.
+  const configuredCheckpoints = (canonicalCheckpoints ?? []).filter(
+    (checkpoint) => !checkpoint.placeholder
+  );
+  if (configuredCheckpoints.length === 0) {
+    throw new Error(
+      "pearl-mainnet requires at least one real canonicalCheckpoints entry (post-fork blockhash from pearld >= v1.1.0) in PRL20_RELEASE_MANIFEST"
     );
   }
 }
@@ -152,6 +224,21 @@ function parseInteger(value, fallback, { min, max }) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+const INDEXER_ROLES = new Set(["all", "api", "worker"]);
+
+function parseRole(value) {
+  const role = String(value ?? "").trim().toLowerCase();
+  if (role === "") {
+    return "all";
+  }
+  if (!INDEXER_ROLES.has(role)) {
+    throw new Error(
+      `invalid PRL20_INDEXER_ROLE "${value}"; expected one of all, api, worker`
+    );
+  }
+  return role;
 }
 
 function emptyToNull(value) {
