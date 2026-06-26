@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <code>v1.2.1</code>
+  <code>v1.3.0</code>
   ·
   <code>node >=22</code>
   ·
@@ -36,7 +36,7 @@
 
 <p align="center">
   Run your own Pearl-backed indexer, reproduce canonical inscription numbers,
-  derive PRL-20 state, and compare deterministic digests with other v1.2.1
+  derive PRL-20 state, and compare deterministic digests with other v1.3.0
   operators.
 </p>
 
@@ -51,20 +51,26 @@ trading APIs.
 The official Pearlscriptions marketplace is an application layer built on top of
 transfer lots. It is not part of this public indexer release.
 
-The `v1.2.1` release keeps the public indexer read-only and adds optional
-operator metadata for the Pearlscriptions operator registry. Registration,
+The public indexer keeps read-only operator metadata for the Pearlscriptions
+operator registry compatibility surface. Registration,
 monitoring, scoring, and rewards remain official application-layer services
 outside this repository.
 
-The `v1.2.1` release adds Pearl **MoE hard-fork** node compatibility (requires
-`pearld >= v1.1.0`, activated 2026-06-12) and three performance/stability
-improvements: an API/worker process split (`PRL20_INDEXER_ROLE`), incremental
-ingest (each new block is O(block) instead of a full re-fold), and a
-bounded-memory cold-start rebuild. It also surfaces advisory chain-canonicality
-status (`canonicalCheckpoints`, node version, `forkEra`). None of this changes
-PRL-20 consensus: the derived snapshot digest is byte-identical for the same
-chain. See [docs/api-contract.md](docs/api-contract.md) for the new advisory
-status fields and [CHANGELOG.md](CHANGELOG.md) for details.
+The `v1.3.0` release adds optional incremental Postgres read-model publishing
+for operators who run the API/worker split on mainnet. The default remains the
+conservative full publish path; set `PRL20_INDEXER_READ_MODEL_MODE=incremental`
+on the private sync worker to publish only touched UTXO rows on pure append
+syncs. Reorgs and cold starts still use the full path. Existing schemas remain
+compatible; run `npm run db:migrate` after upgrading to add the optional
+read-model performance index. Disabling the flag is the rollback.
+
+The public indexer also includes Pearl **MoE hard-fork** node compatibility
+(requires `pearld >= v1.1.0`, activated 2026-06-12), API/worker process split
+(`PRL20_INDEXER_ROLE`), incremental ingest, bounded-memory cold-start rebuild,
+and advisory chain-canonicality status (`canonicalCheckpoints`, node version,
+`forkEra`). None of this changes PRL-20 consensus: the derived snapshot digest
+is byte-identical for the same chain. See [docs/api-contract.md](docs/api-contract.md)
+for advisory status fields and [CHANGELOG.md](CHANGELOG.md) for details.
 
 <table>
   <tr>

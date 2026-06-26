@@ -63,6 +63,8 @@ indexer-sync:
         npm run indexer:sync || true
         sleep "${PRL20_INDEXER_WORKER_SYNC_SLEEP_SECONDS:-5}"
       done
+  environment:
+    PRL20_INDEXER_READ_MODEL_MODE: "incremental"
 ```
 
 The sync worker can still rebuild snapshots, but any CPU-heavy work happens in a
@@ -70,9 +72,17 @@ separate process from the public HTTP server. During local testing after this
 change, `/indexer/status` stayed around 0.34-0.49s and `/indexer/digest` around
 0.20-0.32s over a multi-minute sample, with no timeout spikes.
 
+For v1.3.0 and later, `PRL20_INDEXER_READ_MODEL_MODE=incremental` may be set on
+the private sync worker after an initial full publish. It keeps pure append
+cycles from rewriting the full Postgres UTXO read model. Keep the public API
+process read-only (`PRL20_INDEXER_SYNC_ON_START=0`,
+`PRL20_INDEXER_BACKGROUND_SYNC_MS=0`); it does not need the flag because it does
+not publish snapshots. Roll back by removing the flag and restarting the worker.
+
 ## Tests Added
 
 - `postgres status refreshes manifest written by an external sync worker`
+- `postgres persistent indexer uses incremental read-model publish only when the flag is enabled`
 
 Existing status/digest alignment tests continue to pass, including the case
 where the manifest is ahead but the published snapshot is still the last

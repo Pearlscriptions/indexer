@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.3.0 - 2026-06-25
+
+Postgres read-model performance release. No PRL-20 consensus or protocol
+change: the derived snapshot digest stays byte-identical for the same chain.
+
+Performance / stability:
+
+- Added optional incremental Postgres read-model publishing via
+  `PRL20_INDEXER_READ_MODEL_MODE=incremental`.
+- The default remains `full`, so existing operators keep the v1.2.1
+  `DELETE + INSERT` publish path until they explicitly opt in.
+- On pure append syncs with a live ingest session, the worker now publishes only
+  touched UTXO rows plus the small public inscription projection instead of
+  rebuilding and rewriting the full `indexer_read_utxos` table.
+- Reorgs, cold starts, stale snapshots, and parity fallback still use the full
+  publish path.
+- UTXO confirmations are derived at read time, and coinbase spendability is
+  updated incrementally as outputs mature.
+- CLI `sync` and `worker` output now include `readModelMode`, `readModelMs`, and
+  `touchedRows` so operators can verify whether incremental publishing is active.
+
+Operator notes:
+
+- Existing schemas continue to work. Run `npm run db:migrate` after upgrading
+  to add the optional partial index used by incremental coinbase maturity
+  updates.
+- Recommended rollout: upgrade, run with the default `full` mode once, then set
+  `PRL20_INDEXER_READ_MODEL_MODE=incremental` on the private sync worker.
+- Rollback is immediate: unset `PRL20_INDEXER_READ_MODEL_MODE` or set it to
+  `full`, then restart the worker.
+
+Security boundary:
+
+This release keeps the public indexer read-only and does not add wallet signing,
+transaction broadcast, marketplace settlement, registry backend mutation, or
+rewards logic. The new flag affects only Postgres read-model publication, not
+Pearlscriptions or PRL-20 consensus state.
+
 ## v1.2.1 - 2026-06-14
 
 Performance/stability + Pearl MoE hard-fork compatibility release. No PRL-20

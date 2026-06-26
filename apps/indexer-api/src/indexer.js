@@ -19,6 +19,7 @@ export const PRLS_MINT_FEE_POLICY = Object.freeze({
 });
 
 export const PEARLSCRIPTION_DEFAULT_MARKER = "pearlscription";
+export const SKIP_UTXO_MAP = Symbol.for("prl20.skipUtxoMap");
 const DEFAULT_PAGE_LIMIT = 48;
 const MAX_PAGE_LIMIT = 100;
 const MAX_PAGE_OFFSET = 50_000_000;
@@ -48,6 +49,10 @@ export function createPrl20IngestSession(options = {}) {
   const transactions = [];
   const outputsByOutpoint = {};
   const spendsByOutpoint = {};
+  const readModelDelta = {
+    inscriptions: new Set(),
+    utxos: new Set()
+  };
 
   function applyBlock(block) {
     const transactionList = normalizeBlockTransactions(block);
@@ -69,6 +74,8 @@ export function createPrl20IngestSession(options = {}) {
           inscriptionNumber: inscriptionsById.size
         });
         inscriptionsById.set(inscriptionRecord.id, inscriptionRecord);
+        readModelDelta.inscriptions.add(inscriptionRecord.id);
+        touchReadModelOutpoint(inscriptionRecord.ownerOutpoint);
 
         if (!isPrl20Inscription(inscription)) {
           continue;
@@ -172,7 +179,8 @@ export function createPrl20IngestSession(options = {}) {
     transactions.push(transaction);
 
     for (const output of outputs) {
-      outputsByOutpoint[`${tx.txid}:${output.index}`] = {
+      const outpoint = `${tx.txid}:${output.index}`;
+      outputsByOutpoint[outpoint] = {
         txid: tx.txid,
         vout: output.index,
         blockHeight: block.height ?? null,
@@ -184,6 +192,7 @@ export function createPrl20IngestSession(options = {}) {
         valuePrl: output.valuePrl ?? grainToPrl(output.valueGrain ?? "0"),
         coinbase
       };
+      touchReadModelOutpoint(outpoint);
     }
 
     for (const input of inputs) {
@@ -203,7 +212,24 @@ export function createPrl20IngestSession(options = {}) {
         inscriptionTransferOutputIndex: transaction.inscriptionTransferOutputIndex,
         inscriptionOwnerOutputIndex: transaction.inscriptionOwnerOutputIndex
       };
+      touchReadModelOutpoint(input.previousOutpoint);
     }
+  }
+
+  function touchReadModelOutpoint(outpoint) {
+    if (outpoint) {
+      readModelDelta.utxos.add(String(outpoint));
+    }
+  }
+
+  function consumeReadModelDelta() {
+    const delta = {
+      inscriptions: [...readModelDelta.inscriptions],
+      utxos: [...readModelDelta.utxos]
+    };
+    readModelDelta.inscriptions.clear();
+    readModelDelta.utxos.clear();
+    return delta;
   }
 
   function buildSnapshot(networkMeta = {}) {
@@ -231,6 +257,7 @@ export function createPrl20IngestSession(options = {}) {
   return {
     applyBlock,
     buildSnapshot,
+    consumeReadModelDelta,
     get state() {
       return state;
     },
@@ -1263,7 +1290,9 @@ function assembleSnapshot({
   };
   applyCurrentInscriptionLocations(snapshot);
   snapshot.transferLots = buildTransferLotSnapshot(snapshot);
-  snapshot.utxos = snapshot.utxos ?? buildUtxoSnapshot(snapshot);
+  if (snapshot.utxos !== SKIP_UTXO_MAP) {
+    snapshot.utxos = snapshot.utxos ?? buildUtxoSnapshot(snapshot);
+  }
   snapshot.tokens = buildTokenSummaries(snapshot.state);
   snapshot.token =
     snapshot.tokens.find((token) => token.ticker === PRLS.ticker) ?? getPrlsToken(snapshot.state);

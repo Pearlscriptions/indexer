@@ -49,6 +49,26 @@ tests and smoke checks, not for a live operator endpoint.
 | `PRL20_INDEXER_BATCH_SIZE` | `100` | Blocks fetched per sync batch, clamped to `1-1000`. |
 | `PRL20_INDEXER_BACKGROUND_SYNC_MS` | `30000` | Background sync interval while serving. Set `0` to disable. |
 | `PRL20_INDEXER_SYNC_ON_START` | `1` | Set `0` to load stored state without syncing on boot. |
+| `PRL20_INDEXER_REBUILD_CHUNK_SIZE` | `250` | Blocks folded per chunk during cold-start/full rebuild, clamped to `1-5000`. |
+| `PRL20_INDEXER_READ_MODEL_MODE` | `full` | Set `incremental` on a Postgres sync worker to publish only touched read-model UTXOs on pure append syncs. Reorgs and cold starts still publish full read models. |
+| `PRL20_INDEXER_PARITY_CHECK_EVERY_N_BLOCKS` | `0` | Optional safety cadence for protocol/read-model parity checks. `0` disables the extra check. |
+
+`PRL20_INDEXER_READ_MODEL_MODE=incremental` is an operator performance flag, not
+a protocol flag. It does not change Pearlscriptions numbering, PRL-20 balances,
+token validity, or `/indexer/digest`. Existing deployments keep the conservative
+full read-model publish path unless they explicitly opt in.
+
+Recommended production rollout:
+
+1. Upgrade and run `npm run db:migrate` to add the optional v1.3.0 read-model
+   performance index.
+2. Let the worker complete one normal full publish.
+3. Set `PRL20_INDEXER_READ_MODEL_MODE=incremental` only on the private sync
+   worker.
+4. Restart the worker and watch `readModelMode`, `readModelMs`, `touchedRows`,
+   lag, RSS memory, and API status.
+5. Roll back by unsetting the flag or setting it to `full`, then restarting the
+   worker. No data deletion is required.
 
 ## Optional Operator Registry Metadata
 

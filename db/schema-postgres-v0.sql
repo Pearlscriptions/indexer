@@ -99,6 +99,13 @@ CREATE INDEX IF NOT EXISTS indexer_read_utxos_address_scan_idx
 CREATE INDEX IF NOT EXISTS indexer_read_utxos_protected_idx
   ON indexer_read_utxos(manifest_name, protected, inscription_number);
 
+CREATE INDEX IF NOT EXISTS indexer_read_utxos_coinbase_maturity_idx
+  ON indexer_read_utxos(manifest_name, block_height)
+  WHERE coinbase = TRUE
+    AND protected = FALSE
+    AND spendable = FALSE
+    AND block_height IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS chain_transactions (
   txid TEXT PRIMARY KEY,
   block_height BIGINT,
@@ -252,4 +259,8 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
 
 INSERT INTO schema_migrations (version, description)
 VALUES ('schema-postgres-v0', 'Initial Pearlscriptions / PRL-20 public indexer schema')
+ON CONFLICT (version) DO NOTHING;
+
+INSERT INTO schema_migrations (version, description)
+VALUES ('schema-postgres-v0-1.3.0-coinbase-maturity-index', 'Add partial index for incremental read-model coinbase maturity updates')
 ON CONFLICT (version) DO NOTHING;

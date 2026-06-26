@@ -6,7 +6,7 @@ The official Pearlscriptions marketplace is an application layer built on top of
 
 The server accepts `GET` requests only. Any `POST`, `PUT`, `PATCH`, or `DELETE` request returns `405 METHOD_NOT_ALLOWED`. It never accepts wallet seeds, private keys, WIFs, mnemonics, RPC passwords, or signing material.
 
-## MoE Hard-Fork Advisory Fields (v1.2.1)
+## MoE Hard-Fork Advisory Fields (v1.2.1+)
 
 Since the Pearl MoE hard fork (`pearld >= v1.1.0`, activated 2026-06-12) the API
 exposes advisory chain-canonicality fields. They are **additive, optional, and

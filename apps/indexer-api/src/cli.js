@@ -36,7 +36,10 @@ export async function runCli(argv = process.argv) {
     writeJson({
       ok: true,
       status: sanitize(result.status),
-      summary: summarizeSnapshot(result.snapshot)
+      summary: summarizeSnapshot(result.snapshot),
+      readModelMode: result.readModelMode ?? null,
+      readModelMs: result.readModelMs ?? null,
+      touchedRows: result.touchedRows ?? null
     });
   } else if (command === "worker") {
     await runWorker();
@@ -117,6 +120,9 @@ export async function runWorkerLoop(indexer, config, options = {}) {
         ok: true,
         evt: "indexer-worker-sync",
         ingestPath: indexer.lastIngestPath,
+        readModelMode: result.readModelMode ?? null,
+        readModelMs: result.readModelMs ?? null,
+        touchedRows: result.touchedRows ?? null,
         status: sanitize(result.status)
       });
     } catch (error) {

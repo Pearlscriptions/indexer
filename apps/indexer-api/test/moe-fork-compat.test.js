@@ -224,7 +224,7 @@ test("advisory fields appear on /health (ok:true with warning on mismatch) and /
     startHeight: 1,
     canonicalCheckpoints: [{ height: 2, hash: hash("ff"), placeholder: false }],
     forkEra: "moe-v2",
-    indexerVersion: "1.2.1"
+    indexerVersion: "1.3.0"
   });
   await indexer.syncToTip();
 
@@ -233,7 +233,7 @@ test("advisory fields appear on /health (ok:true with warning on mismatch) and /
     getStatus: () => indexer.status(),
     chain: "pearl-simnet",
     manifestDigest: "a".repeat(64),
-    version: "1.2.1",
+    version: "1.3.0",
     forkEra: "moe-v2"
   });
 
@@ -241,7 +241,7 @@ test("advisory fields appear on /health (ok:true with warning on mismatch) and /
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true); // never flipped to false
   assert.equal(health.body.forkEra, "moe-v2");
-  assert.equal(health.body.indexerVersion, "1.2.1");
+  assert.equal(health.body.indexerVersion, "1.3.0");
   assert.equal(health.body.checkpoint.status, "mismatch");
   assert.equal(health.body.pearlNodeVersion.meetsMinimum, true);
   assert.equal(
@@ -254,7 +254,7 @@ test("advisory fields appear on /health (ok:true with warning on mismatch) and /
   // Additive keys live inside the status object, not wrapped.
   assert.equal(status.body.checkpoint.status, "mismatch");
   assert.equal(status.body.forkEra, "moe-v2");
-  assert.equal(status.body.indexerVersion, "1.2.1");
+  assert.equal(status.body.indexerVersion, "1.3.0");
   assert.equal(status.body.pearlNodeVersion.meetsMinimum, true);
   assert.equal(status.body.nodeSchema, "compatible");
   // pearlNodeVersion carries only a version string, no host/path.
@@ -267,7 +267,7 @@ test("advisory fields appear on /health (ok:true with warning on mismatch) and /
 test("/operator exposes only a static forkEra and older operator docs still validate", () => {
   const withFork = operatorMetadataDocument(
     { configured: false },
-    { chain: "pearl-simnet", version: "1.2.1", forkEra: "moe-v2" }
+    { chain: "pearl-simnet", version: "1.3.0", forkEra: "moe-v2" }
   );
   assert.equal(withFork.forkEra, "moe-v2");
   // forkEra is additive and OPTIONAL: the doc still validates clean.
@@ -296,7 +296,7 @@ test("both buildStatus and buildStatusFromSnapshot include the advisory fields",
     startHeight: 1,
     canonicalCheckpoints: [{ height: 1, hash: hash("01"), placeholder: false }],
     forkEra: "moe-v2",
-    indexerVersion: "1.2.1"
+    indexerVersion: "1.3.0"
   });
   // A real sync populates the manifest blocks and runs both advisory checks.
   await indexer.syncToTip();
@@ -333,7 +333,7 @@ test("/indexer/digest exposes checkpoint and forkEra as siblings without changin
     }),
     chain: "pearl-mainnet",
     manifestDigest: "b".repeat(64),
-    version: "1.2.1",
+    version: "1.3.0",
     forkEra: "moe-v2"
   });
 
@@ -445,7 +445,7 @@ test("MoE advisory fields stay out of the protocol snapshot allowlist and the di
     checkpoint: { status: "mismatch", height: 2, expectedHash: "f".repeat(64), observedHash: "0".repeat(64) },
     forkEra: "moe-v2",
     pearlNodeVersion: { raw: "/pearld:1.0.6/", meetsMinimum: false },
-    indexerVersion: "1.2.1",
+    indexerVersion: "1.3.0",
     nodeSchema: "incompatible",
     warning: "Indexer is on a non-canonical chain",
     network: {
@@ -453,7 +453,7 @@ test("MoE advisory fields stay out of the protocol snapshot allowlist and the di
       checkpoint: { status: "mismatch" },
       forkEra: "moe-v2",
       pearlNodeVersion: { raw: "/pearld:1.0.6/" },
-      indexerVersion: "1.2.1",
+      indexerVersion: "1.3.0",
       nodeSchema: "incompatible"
     }
   };
@@ -699,7 +699,7 @@ function makeRegistryResults(overrides = {}) {
       rewardAddress: "prl1ppmla838yflfcsm5vr6lfgvfclf4fgn3puja70cke4wqqkl6vflaq3cn7ea",
       registryChallenge: "registry-nonce"
     },
-    { chain, version: "1.2.1", forkEra }
+    { chain, version: "1.3.0", forkEra }
   );
 
   const status = {

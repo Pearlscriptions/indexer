@@ -1,10 +1,15 @@
-import { createPrl20IngestSession, PRLS_MINT_FEE_POLICY } from "./indexer.js";
+import { createPrl20IngestSession, PRLS_MINT_FEE_POLICY, SKIP_UTXO_MAP } from "./indexer.js";
 import {
   normalizeProtocolSnapshotForComparison,
   snapshotDigest,
   summarizeSnapshot
 } from "./snapshot-compare.js";
-import { assertHash, blockFileName, createIndexerStorage } from "./storage.js";
+import {
+  assertHash,
+  blockFileName,
+  createIndexerStorage,
+  readModelParityDigestFromSnapshot
+} from "./storage.js";
 
 const SCHEMA_VERSION = 1;
 
@@ -84,6 +89,8 @@ export class PersistentPrl20Indexer {
       0,
       normalizeNonNegativeInteger(parityCheckEveryNBlocks ?? parityEnv, "parityCheckEveryNBlocks")
     );
+    this.readModelMode =
+      process.env.PRL20_INDEXER_READ_MODEL_MODE === "incremental" ? "incremental" : "full";
     this.blocksAppliedSinceParityCheck = 0;
     this.log = log;
     // Observability hook for tests: records which ingest path the last sync took
@@ -182,11 +189,21 @@ export class PersistentPrl20Indexer {
       }
     }
 
-    const { snapshot, blocks, blockCount } = await this.materializeSnapshot(
+    const { snapshot, blocks, blockCount, writeOptions } = await this.materializeSnapshot(
       bestHeight,
       rollbackChanged
     );
-    await this.storage.writeSnapshot(snapshot);
+    let writeResult = await this.storage.writeSnapshot(snapshot, writeOptions);
+    let finalSnapshot = snapshot;
+    let finalBlockCount = blockCount ?? blocks.length;
+    if (writeOptions?.readModelMode === "incremental") {
+      const parityResult = await this.maybeReadModelParityCheck(snapshot, bestHeight);
+      if (parityResult?.snapshot) {
+        finalSnapshot = parityResult.snapshot;
+        finalBlockCount = parityResult.blockCount ?? finalBlockCount;
+        writeResult = parityResult.writeResult ?? writeResult;
+      }
+    }
 
     return {
       bestHeight,
@@ -194,9 +211,12 @@ export class PersistentPrl20Indexer {
       indexedHeight: this.manifest.indexedHeight,
       indexedHash: this.manifest.indexedHash,
       blocks,
-      blockCount: blockCount ?? blocks.length,
-      snapshot,
-      status: this.buildStatus(bestHeight)
+      blockCount: finalBlockCount,
+      snapshot: finalSnapshot,
+      status: this.buildStatus(bestHeight),
+      readModelMs: writeResult?.readModelMs ?? null,
+      touchedRows: writeResult?.touchedRows ?? null,
+      readModelMode: writeResult?.readModels?.mode ?? null
     };
   }
 
@@ -360,7 +380,12 @@ export class PersistentPrl20Indexer {
         return this.rebuildSnapshot(bestHeight);
       }
       this.lastIngestPath = "incremental";
-      return { snapshot: this.publishSessionSnapshot(bestHeight), blocks: [], blockCount: 0 };
+      return {
+        snapshot: this.publishSessionSnapshot(bestHeight),
+        blocks: [],
+        blockCount: 0,
+        writeOptions: { readModelMode: "full" }
+      };
     }
 
     const canIncrement = sessionInSync && appendedManifestBlocks.length > 0;
@@ -370,6 +395,7 @@ export class PersistentPrl20Indexer {
       return this.rebuildSnapshot(bestHeight);
     }
 
+    const previousIndexedHeight = this.sessionBlocks.at(-1)?.height ?? null;
     const appendedBlocks = await this.storage.readBlocks(appendedManifestBlocks);
     for (let index = 0; index < appendedBlocks.length; index += 1) {
       this.ingestSession.applyBlock(appendedBlocks[index]);
@@ -381,9 +407,34 @@ export class PersistentPrl20Indexer {
     }
 
     this.lastIngestPath = "incremental";
-    let snapshot = this.publishSessionSnapshot(bestHeight);
+    let snapshot = this.publishSessionSnapshot(bestHeight, {
+      skipUtxos: this.canUseIncrementalReadModel()
+    });
     snapshot = await this.maybeParityCheck(snapshot, bestHeight);
-    return { snapshot, blocks: appendedBlocks, blockCount: appendedBlocks.length };
+    if (this.lastIngestPath !== "incremental" || !this.canUseIncrementalReadModel()) {
+      return {
+        snapshot,
+        blocks: appendedBlocks,
+        blockCount: appendedBlocks.length,
+        writeOptions: { readModelMode: "full" }
+      };
+    }
+    const delta = this.ingestSession.consumeReadModelDelta();
+    return {
+      snapshot,
+      blocks: appendedBlocks,
+      blockCount: appendedBlocks.length,
+      writeOptions: {
+        readModelMode: "incremental",
+        readModelDelta: {
+          ...delta,
+          previousIndexedHeight,
+          previousBestHeight: previousIndexedHeight,
+          indexedHeight: this.manifest.indexedHeight,
+          bestHeight
+        }
+      }
+    };
   }
 
   async rebuildSnapshot(bestHeight) {
@@ -410,23 +461,29 @@ export class PersistentPrl20Indexer {
       height: block.height,
       hash: block.hash
     }));
+    this.ingestSession.consumeReadModelDelta();
     this.blocksAppliedSinceParityCheck = 0;
     this.lastIngestPath = "full-rebuild";
     const snapshot = this.publishSessionSnapshot(bestHeight);
     // Do not return the raw blocks: re-materializing the whole history here would
     // reintroduce the very memory spike this chunking removes. Callers that need a
     // count use blockCount; the appended-blocks fast path still returns its slice.
-    return { snapshot, blocks: [], blockCount: manifestBlocks.length };
+    return {
+      snapshot,
+      blocks: [],
+      blockCount: manifestBlocks.length,
+      writeOptions: { readModelMode: "full" }
+    };
   }
 
   // Builds the published snapshot from the live session accumulators and tags it
   // with the published-snapshot metadata (protocol digest + summary) the API and
   // status paths read back, exactly as buildSnapshot(bestHeight, blocks) did.
-  publishSessionSnapshot(bestHeight) {
+  publishSessionSnapshot(bestHeight, { skipUtxos = false } = {}) {
     const snapshot = this.ingestSession.buildSnapshot({
       network: this.buildNetworkMeta(bestHeight),
       prlBalances: {},
-      utxos: null
+      utxos: skipUtxos ? SKIP_UTXO_MAP : null
     });
     return withPublishedSnapshotMetadata(snapshot);
   }
@@ -489,6 +546,47 @@ export class PersistentPrl20Indexer {
     this.sessionBlocks = sessionBlocks;
     this.lastIngestPath = "incremental";
     return incrementalSnapshot;
+  }
+
+  canUseIncrementalReadModel() {
+    const storageStatus = this.storage.publicStatus?.() ?? {};
+    return (
+      this.readModelMode === "incremental" &&
+      storageStatus.backend === "postgres" &&
+      storageStatus.readModels === true
+    );
+  }
+
+  async maybeReadModelParityCheck(incrementalSnapshot, bestHeight) {
+    if (
+      this.parityCheckEveryNBlocks <= 0 ||
+      typeof this.storage.readModelParityDigest !== "function"
+    ) {
+      return null;
+    }
+    const dbDigest = await this.storage.readModelParityDigest();
+    const truthDigest = readModelParityDigestFromSnapshot(incrementalSnapshot);
+    if (dbDigest === truthDigest) {
+      return null;
+    }
+    this.log?.error?.(
+      JSON.stringify({
+        evt: "indexer-readmodel-delta-mismatch",
+        indexedHeight: this.manifest.indexedHeight,
+        indexedHash: this.manifest.indexedHash,
+        dbDigest,
+        truthDigest
+      })
+    );
+    const rebuilt = await this.rebuildSnapshot(bestHeight);
+    const writeResult = await this.storage.writeSnapshot(rebuilt.snapshot, {
+      readModelMode: "full"
+    });
+    return {
+      snapshot: rebuilt.snapshot,
+      blockCount: rebuilt.blockCount,
+      writeResult
+    };
   }
 
   // Network metadata block shared by every published snapshot, matching the

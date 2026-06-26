@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import { createPersistentPrl20Indexer } from "../src/persistent-indexer.js";
 import { compareSnapshots, normalizeSnapshotForComparison } from "../src/snapshot-compare.js";
-import { PostgresIndexerStorage, blockFileName, createIndexerStorage } from "../src/storage.js";
+import {
+  PostgresIndexerStorage,
+  blockFileName,
+  createIndexerStorage,
+  readModelParityDigestFromSnapshot
+} from "../src/storage.js";
 
 test("persistent indexer backfills once, stores blocks, and reloads from disk", async () => {
   const storeDir = await mkdtemp(join(tmpdir(), "prl20-indexer-test-"));
@@ -459,6 +464,126 @@ test("postgres storage chunks read-model inserts to stay under jsonb parameter l
   assert.equal(pool.readInscriptions.length, 1201);
 });
 
+test("postgres storage applies incremental read-model delta without full UTXO rewrite", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "incremental-read-model-test" });
+  await storage.init();
+
+  await storage.writeSnapshot({
+    network: { chain: "pearl-simnet", indexedHeight: 1, indexedHash: hash("d1") },
+    inscriptions: [readInscription("inscription-0", 0, "prl1alice")],
+    transferLots: [],
+    utxos: {
+      prl1alice: [readUtxo("alice-old:0", "prl1alice", "200000000", true)],
+      prl1bob: [
+        readUtxo("bob-untouched:0", "prl1bob", "100000000", false, {
+          scriptPubKey: "5120bob",
+          valuePrl: "1.00000000",
+          source: "snapshot-utxo-read-model"
+        })
+      ]
+    }
+  });
+
+  pool.queries = [];
+  const incrementalSnapshot = {
+    network: { chain: "pearl-simnet", indexedHeight: 2, indexedHash: hash("d2") },
+    inscriptions: [
+      {
+        ...readInscription("inscription-0", 0, "prl1alice"),
+        currentOutpoint: "alice-new:0",
+        currentOutputIndex: 0
+      }
+    ],
+    transferLots: [],
+    outputsByOutpoint: {
+      "alice-new:0": {
+        txid: "alice-new",
+        vout: 0,
+        address: "prl1alice",
+        scriptPubKey: "5120alice",
+        valueGrain: "199999000",
+        blockHeight: 2,
+        coinbase: false
+      },
+      "bob-untouched:0": {
+        txid: "bob-untouched",
+        vout: 0,
+        address: "prl1bob",
+        scriptPubKey: "5120bob",
+        valueGrain: "100000000",
+        blockHeight: 1,
+        coinbase: false
+      }
+    },
+    spendsByOutpoint: {
+      "alice-old:0": { txid: "alice-new", inputIndex: 0, blockHeight: 2 }
+    },
+    utxos: Symbol.for("prl20.skipUtxoMap")
+  };
+
+  const result = await storage.writeSnapshot(incrementalSnapshot, {
+    readModelMode: "incremental",
+    readModelDelta: {
+      utxos: ["alice-old:0", "alice-new:0"],
+      previousBestHeight: 1,
+      bestHeight: 2
+    }
+  });
+
+  assert.equal(result.readModels.mode, "incremental");
+  assert.equal(pool.readUtxos.some((row) => row.outpoint === "alice-old:0"), false);
+  assert.equal(pool.readUtxos.some((row) => row.outpoint === "alice-new:0"), true);
+  assert.equal(pool.readUtxos.some((row) => row.outpoint === "bob-untouched:0"), true);
+  assert.equal(
+    pool.queries.some((query) => query === "DELETE FROM indexer_read_utxos WHERE manifest_name = $1"),
+    false
+  );
+  assert.equal(await storage.readModelParityDigest(), readModelParityDigestFromSnapshot(incrementalSnapshot));
+});
+
+test("postgres incremental read model matures coinbase spendability without touching every UTXO", async () => {
+  const pool = new FakePgPool();
+  const storage = new PostgresIndexerStorage({ pool, manifestName: "coinbase-maturity-test" });
+  await storage.init();
+
+  await storage.writeSnapshot({
+    network: { chain: "pearl-simnet", indexedHeight: 99, indexedHash: hash("e1") },
+    inscriptions: [],
+    transferLots: [],
+    utxos: {
+      prl1miner: [
+        readUtxo("coinbase-old:0", "prl1miner", "5000000000", false, {
+          blockHeight: 1,
+          confirmations: 99,
+          coinbase: true,
+          spendable: false
+        })
+      ]
+    }
+  });
+
+  await storage.writeSnapshot(
+    {
+      network: { chain: "pearl-simnet", indexedHeight: 100, indexedHash: hash("e2") },
+      inscriptions: [],
+      transferLots: [],
+      outputsByOutpoint: {},
+      spendsByOutpoint: {},
+      utxos: Symbol.for("prl20.skipUtxoMap")
+    },
+    {
+      readModelMode: "incremental",
+      readModelDelta: { utxos: [], previousBestHeight: 99, bestHeight: 100 }
+    }
+  );
+
+  const page = await storage.listAddressUtxos("prl1miner", new URLSearchParams("limit=10"));
+  assert.equal(page.spendableTotal, 1);
+  assert.equal(page.utxos[0].confirmations, 100);
+  assert.equal(page.utxos[0].spendable, true);
+});
+
 test("postgres status follows the published snapshot while manifest is ahead", async () => {
   const pool = new FakePgPool();
   const storage = new PostgresIndexerStorage({ pool, manifestName: "published-status-test" });
@@ -553,6 +678,69 @@ test("postgres status refreshes manifest written by an external sync worker", as
   const refreshed = await apiIndexer.status();
   assert.equal(refreshed.indexedHeight, 2);
   assert.equal(refreshed.indexedHash, secondBlock.hash);
+});
+
+test("postgres persistent indexer uses incremental read-model publish only when the flag is enabled", async () => {
+  const previousMode = process.env.PRL20_INDEXER_READ_MODEL_MODE;
+  process.env.PRL20_INDEXER_READ_MODEL_MODE = "incremental";
+  try {
+    const pool = new FakePgPool();
+    const storage = new PostgresIndexerStorage({ pool, manifestName: "persistent-incremental-read-model-test" });
+    const firstBlock = block(1, hash("f1"), null, [
+      tx(
+        "tx-deploy",
+        "prl1alice",
+        "5120alice",
+        "{\"p\":\"prl-20\",\"op\":\"deploy\",\"tick\":\"prls\",\"max\":\"2100000000\",\"lim\":\"100000\",\"dec\":\"18\"}"
+      )
+    ]);
+    const secondBlock = block(2, hash("f2"), firstBlock.hash, [
+      spendInscriptionTx(
+        "tx-move-deploy",
+        "tx-deploy",
+        0,
+        "prl1bob",
+        "5120bob",
+        "prl1alice",
+        "5120alice",
+        "1.00000000"
+      )
+    ]);
+    const chainBlocks = [firstBlock];
+    const calls = [];
+    const rpc = makeMutableRpc(chainBlocks, calls);
+    const indexer = createPersistentPrl20Indexer({
+      pearlRpc: rpc,
+      storage,
+      chain: "pearl-simnet",
+      startHeight: 1
+    });
+
+    const first = await indexer.syncToTip();
+    assert.equal(first.readModelMode, "full");
+    assert.notEqual(first.snapshot.utxos, Symbol.for("prl20.skipUtxoMap"));
+
+    chainBlocks.push(secondBlock);
+    pool.queries = [];
+    const second = await indexer.syncToTip();
+
+    assert.equal(second.readModelMode, "incremental");
+    assert.equal(second.snapshot.utxos, Symbol.for("prl20.skipUtxoMap"));
+    assert.equal(second.touchedRows.utxos, 3);
+    assert.equal(pool.readUtxos.some((row) => row.outpoint === "tx-deploy:0"), false);
+    assert.equal(pool.readUtxos.some((row) => row.outpoint === "tx-move-deploy:0"), true);
+    assert.equal(pool.readUtxos.some((row) => row.outpoint === "tx-move-deploy:1"), true);
+    assert.equal(
+      pool.queries.some((query) => query === "DELETE FROM indexer_read_utxos WHERE manifest_name = $1"),
+      false
+    );
+  } finally {
+    if (previousMode === undefined) {
+      delete process.env.PRL20_INDEXER_READ_MODEL_MODE;
+    } else {
+      process.env.PRL20_INDEXER_READ_MODEL_MODE = previousMode;
+    }
+  }
 });
 
 test("persistent indexer fails closed when a stored block file is missing", async () => {
@@ -817,6 +1005,37 @@ function makeRpc(blocks, calls = [], options = {}) {
   };
 }
 
+function makeMutableRpc(blocks, calls = [], options = {}) {
+  const hasNetworkInfo = !("networkInfo" in options) || options.networkInfo !== undefined;
+  const networkInfo =
+    "networkInfo" in options
+      ? options.networkInfo
+      : { subversion: "/pearlwire:0.5.0/pearld:1.1.0/", version: 1010000 };
+  return async (method, params = []) => {
+    calls.push([method, params]);
+    if (method === "getblockcount") {
+      return Math.max(...blocks.map((item) => item.height));
+    }
+    if (method === "getblockhash") {
+      const block = blocks.find((item) => item.height === params[0]);
+      assert.ok(block, `missing block at height ${params[0]}`);
+      return block.hash;
+    }
+    if (method === "getblock") {
+      const block = blocks.find((item) => item.hash === params[0]);
+      assert.ok(block, `missing block hash ${params[0]}`);
+      return block;
+    }
+    if (method === "getnetworkinfo") {
+      if (!hasNetworkInfo) {
+        throw new Error("Method not found");
+      }
+      return networkInfo;
+    }
+    throw new Error(`unexpected RPC method ${method}`);
+  };
+}
+
 function block(height, hashValue, previousblockhash, transactions) {
   return {
     height,
@@ -1068,23 +1287,51 @@ class FakePgPool {
       this.readInscriptions = this.readInscriptions.filter((row) => row.manifest_name !== params[0]);
       return { rows: [] };
     }
+    if (compact.startsWith("DELETE FROM indexer_read_utxos WHERE manifest_name = $1 AND outpoint = ANY")) {
+      const [manifestName, outpoints] = params;
+      const before = this.readUtxos.length;
+      const set = new Set(outpoints);
+      this.readUtxos = this.readUtxos.filter(
+        (row) => row.manifest_name !== manifestName || !set.has(row.outpoint)
+      );
+      return { rows: [], rowCount: before - this.readUtxos.length };
+    }
     if (compact.startsWith("DELETE FROM indexer_read_utxos")) {
       this.readUtxos = this.readUtxos.filter((row) => row.manifest_name !== params[0]);
       return { rows: [] };
     }
     if (compact.startsWith("INSERT INTO indexer_read_inscriptions")) {
       const [manifestName, rowsJson] = params;
-      this.readInscriptions.push(
-        ...JSON.parse(rowsJson).map((row) => ({ ...row, manifest_name: manifestName }))
-      );
+      for (const row of JSON.parse(rowsJson)) {
+        upsertRow(this.readInscriptions, { ...row, manifest_name: manifestName }, (candidate) =>
+          candidate.manifest_name === manifestName && candidate.inscription_id === row.inscription_id
+        );
+      }
       return { rows: [] };
     }
     if (compact.startsWith("INSERT INTO indexer_read_utxos")) {
       const [manifestName, rowsJson] = params;
-      this.readUtxos.push(
-        ...JSON.parse(rowsJson).map((row) => ({ ...row, manifest_name: manifestName }))
-      );
+      for (const row of JSON.parse(rowsJson)) {
+        upsertRow(this.readUtxos, { ...row, manifest_name: manifestName }, (candidate) =>
+          candidate.manifest_name === manifestName && candidate.outpoint === row.outpoint
+        );
+      }
       return { rows: [] };
+    }
+    if (compact.startsWith("UPDATE indexer_read_utxos SET spendable = TRUE")) {
+      const [manifestName, matureThrough, previousMatureThrough] = params;
+      let rowCount = 0;
+      for (const row of this.readUtxos) {
+        if (row.manifest_name !== manifestName) continue;
+        if (!row.coinbase || row.protected || row.spendable) continue;
+        if (row.block_height === null || row.block_height === undefined) continue;
+        if (Number(row.block_height) > Number(matureThrough)) continue;
+        if (previousMatureThrough !== undefined && Number(row.block_height) <= Number(previousMatureThrough)) continue;
+        row.spendable = true;
+        row.record_json = { ...row.record_json, spendable: true };
+        rowCount += 1;
+      }
+      return { rows: [], rowCount };
     }
     if (compact.startsWith("SELECT COUNT(*)::bigint AS total, MIN(inscription_number)::bigint")) {
       const rows = filterReadInscriptions(this.readInscriptions, compact, params, false);
@@ -1095,6 +1342,18 @@ class FakePgPool {
           latest_inscription_number: rows.length ? Math.max(...rows.map((row) => row.inscription_number)) : null
         }]
       };
+    }
+    if (
+      compact.startsWith("SELECT record_json FROM indexer_read_inscriptions") &&
+      compact.includes("ORDER BY inscription_number ASC, inscription_id ASC")
+    ) {
+      const rows = this.readInscriptions
+        .filter((row) => row.manifest_name === params[0])
+        .toSorted((left, right) => {
+          const numberDiff = Number(left.inscription_number ?? 0) - Number(right.inscription_number ?? 0);
+          return numberDiff || String(left.inscription_id).localeCompare(String(right.inscription_id));
+        });
+      return { rows: rows.map((row) => ({ record_json: row.record_json })) };
     }
     if (compact.startsWith("SELECT record_json FROM indexer_read_inscriptions")) {
       const rows = filterReadInscriptions(this.readInscriptions, compact, params, true);
@@ -1119,13 +1378,50 @@ class FakePgPool {
         }]
       };
     }
-    if (compact.startsWith("SELECT record_json FROM indexer_read_utxos")) {
+    if (
+      compact.startsWith("SELECT record_json, block_height, coinbase, protected, spendable FROM indexer_read_utxos") &&
+      compact.includes("ORDER BY outpoint ASC")
+    ) {
+      const rows = this.readUtxos
+        .filter((row) => row.manifest_name === params[0])
+        .toSorted((left, right) => String(left.outpoint).localeCompare(String(right.outpoint)));
+      return {
+        rows: rows.map((row) => ({
+          record_json: row.record_json,
+          block_height: row.block_height,
+          coinbase: row.coinbase,
+          protected: row.protected,
+          spendable: row.spendable
+        }))
+      };
+    }
+    if (
+      compact.startsWith("SELECT record_json FROM indexer_read_utxos") ||
+      compact.startsWith("SELECT record_json, block_height, coinbase, protected, spendable FROM indexer_read_utxos")
+    ) {
       const rows = filterReadUtxos(this.readUtxos, compact, params, true);
       sortReadUtxos(rows);
       const { limit, offset } = limitOffset(params);
-      return { rows: rows.slice(offset, offset + limit).map((row) => ({ record_json: row.record_json })) };
+      return {
+        rows: rows.slice(offset, offset + limit).map((row) => ({
+          record_json: row.record_json,
+          block_height: row.block_height,
+          coinbase: row.coinbase,
+          protected: row.protected,
+          spendable: row.spendable
+        }))
+      };
     }
     throw new Error(`unexpected SQL: ${compact}`);
+  }
+}
+
+function upsertRow(rows, row, predicate) {
+  const index = rows.findIndex(predicate);
+  if (index >= 0) {
+    rows[index] = row;
+  } else {
+    rows.push(row);
   }
 }
 

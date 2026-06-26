@@ -79,6 +79,38 @@ npm run indexer:digest
 The digest is the main comparison tool between independent operators. Compare it
 only when indexers report the same Pearl tip height and hash.
 
+## v1.3.0 Read-Model Mode
+
+v1.3.0 adds optional incremental Postgres read-model publishing for the private
+sync worker:
+
+```text
+PRL20_INDEXER_READ_MODEL_MODE=incremental
+```
+
+Leave the variable unset, or set it to `full`, to keep the older conservative
+full publish behavior. Incremental mode is intended for production Postgres
+operators after the first full publish has completed. It affects only
+materialized read-model tables such as `indexer_read_utxos`; it does not alter
+Pearlscriptions parsing, PRL-20 state, or `/indexer/digest`.
+
+Recommended rollout:
+
+1. Upgrade to v1.3.0.
+2. Run `npm run verify`.
+3. Run `npm run db:migrate` to add the optional v1.3.0 read-model performance
+   index.
+4. Start the worker once in default `full` mode and let it publish a complete
+   snapshot.
+5. Enable `PRL20_INDEXER_READ_MODEL_MODE=incremental` on the private sync
+   worker, not on public API-only processes.
+6. Watch worker output for `readModelMode: "incremental"`, lower `readModelMs`,
+   small `touchedRows.utxos`, no lag growth, and stable memory.
+
+Rollback is immediate: unset `PRL20_INDEXER_READ_MODEL_MODE` or set it to
+`full`, then restart the worker. No data deletion is required for either
+direction.
+
 ## Serve
 
 ```bash
@@ -113,6 +145,7 @@ Monitor:
 - Pearl node height versus indexer height
 - current indexed block hash
 - `/indexer/digest` at known tips
+- worker `readModelMode`, `readModelMs`, and `touchedRows`
 - Postgres disk usage
 - API error rate
 - reorg count

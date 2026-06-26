@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -78,6 +79,7 @@ export class JsonFileIndexerStorage {
 
   async writeSnapshot(snapshot) {
     await writeJsonAtomic(this.snapshotPath, snapshot);
+    return null;
   }
 
   async readSnapshot() {
@@ -236,8 +238,11 @@ export class PostgresIndexerStorage {
     return blocks;
   }
 
-  async writeSnapshot(snapshot) {
+  async writeSnapshot(snapshot, options = {}) {
     const storedSnapshot = compactSnapshotForStorage(snapshot);
+    const readModelStartedAt = Date.now();
+    let appliedMode = "none";
+    let touchedRows = { inscriptions: 0, utxos: 0 };
     await this.withTransaction(async (client) => {
       await client.query(
         `INSERT INTO indexer_snapshots (name, snapshot_json, updated_at)
@@ -248,9 +253,26 @@ export class PostgresIndexerStorage {
         [this.manifestName, JSON.stringify(storedSnapshot)]
       );
       if (hasReadModelSnapshot(snapshot)) {
-        await materializeReadModels(client, this.manifestName, snapshot);
+        if (options.readModelMode === "incremental" && options.readModelDelta) {
+          touchedRows = await applyReadModelDelta(
+            client,
+            this.manifestName,
+            snapshot,
+            options.readModelDelta
+          );
+          appliedMode = "incremental";
+        } else {
+          assertFullReadModelSnapshot(snapshot);
+          touchedRows = await materializeReadModels(client, this.manifestName, snapshot);
+          appliedMode = "full";
+        }
       }
     });
+    return {
+      readModels: { mode: appliedMode, touchedRows },
+      readModelMs: Date.now() - readModelStartedAt,
+      touchedRows
+    };
   }
 
   async writeSnapshotNetworkMetadata(snapshot) {
@@ -322,7 +344,7 @@ export class PostgresIndexerStorage {
       params
     );
     const rows = await this.query(
-      `SELECT record_json
+      `SELECT record_json, block_height, coinbase, protected, spendable
          FROM indexer_read_utxos
         WHERE ${whereSql}
         ORDER BY protected ASC, spendable DESC, value_grain DESC, block_height ASC NULLS LAST, outpoint ASC
@@ -330,7 +352,10 @@ export class PostgresIndexerStorage {
        OFFSET $${params.length + 2}`,
       [...params, pagination.limit, pagination.offset]
     );
-    const utxos = rows.rows.map((row) => normalizeJsonObject(row.record_json));
+    const bestHeight = await this.currentReadModelBestHeight();
+    const utxos = rows.rows.map((row) =>
+      withRuntimeUtxoState(normalizeJsonObject(row.record_json), bestHeight, row)
+    );
     const total = dbInteger(count.rows[0]?.total);
     const totalValueGrain = String(count.rows[0]?.total_value_grain ?? "0");
     return {
@@ -388,6 +413,35 @@ export class PostgresIndexerStorage {
     if (this.ownsPool && this.pool?.end) {
       await this.pool.end();
     }
+  }
+
+  async currentReadModelBestHeight() {
+    const network = await this.readSnapshotNetworkMetadata().catch(() => null);
+    return safeIntegerOrNull(network?.indexedHeight ?? network?.bestHeight);
+  }
+
+  async readModelParityDigest() {
+    const bestHeight = await this.currentReadModelBestHeight();
+    const inscriptions = await this.query(
+      `SELECT record_json
+         FROM indexer_read_inscriptions
+        WHERE manifest_name = $1
+        ORDER BY inscription_number ASC, inscription_id ASC`,
+      [this.manifestName]
+    );
+    const utxos = await this.query(
+      `SELECT record_json, block_height, coinbase, protected, spendable
+         FROM indexer_read_utxos
+        WHERE manifest_name = $1
+        ORDER BY outpoint ASC`,
+      [this.manifestName]
+    );
+    return readModelDigest({
+      inscriptions: inscriptions.rows.map((row) => normalizeJsonObject(row.record_json)),
+      utxos: utxos.rows.map((row) =>
+        withRuntimeUtxoState(normalizeJsonObject(row.record_json), bestHeight, row)
+      )
+    });
   }
 
   publicStatus() {
@@ -573,8 +627,15 @@ function hasReadModelSnapshot(snapshot) {
   return Boolean(
     snapshot &&
       (Array.isArray(snapshot.inscriptions) ||
-        (snapshot.utxos && typeof snapshot.utxos === "object"))
+        (snapshot.utxos && typeof snapshot.utxos === "object") ||
+        snapshot.utxos === skipUtxoMapSymbol())
   );
+}
+
+function assertFullReadModelSnapshot(snapshot) {
+  if (snapshot?.utxos === skipUtxoMapSymbol()) {
+    throw new Error("FULL_READ_MODEL_REQUIRES_UTXO_SNAPSHOT");
+  }
 }
 
 function compactSnapshotForStorage(snapshot) {
@@ -643,25 +704,29 @@ function compactAddressToScriptPubKey(snapshot, originalMap = {}) {
 }
 
 async function materializeReadModels(client, manifestName, snapshot) {
-  await materializeReadModelTable({
+  const inscriptions = await materializeReadModelTable({
     client,
     manifestName,
     table: "indexer_read_inscriptions",
     rows: inscriptionReadRows(snapshot)
   });
-  await materializeReadModelTable({
+  const utxos = await materializeReadModelTable({
     client,
     manifestName,
     table: "indexer_read_utxos",
     rows: utxoReadRows(snapshot)
   });
+  return { inscriptions, utxos };
 }
 
-async function materializeReadModelTable({ client, manifestName, table, rows }) {
-  await client.query(`DELETE FROM ${table} WHERE manifest_name = $1`, [manifestName]);
-  if (rows.length === 0) {
-    return;
+async function materializeReadModelTable({ client, manifestName, table, rows, skipDelete = false }) {
+  if (!skipDelete) {
+    await client.query(`DELETE FROM ${table} WHERE manifest_name = $1`, [manifestName]);
   }
+  if (rows.length === 0) {
+    return 0;
+  }
+  let touchedRows = 0;
   for (let offset = 0; offset < rows.length; offset += READ_MODEL_INSERT_CHUNK_SIZE) {
     const json = JSON.stringify(rows.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE));
     if (table === "indexer_read_inscriptions") {
@@ -678,9 +743,16 @@ async function materializeReadModelTable({ client, manifestName, table, rows }) 
               current_owner_address TEXT,
               current_owner_script_pubkey TEXT,
               record_json JSONB
-            )`,
+            )
+       ON CONFLICT (manifest_name, inscription_id) DO UPDATE SET
+          inscription_number = EXCLUDED.inscription_number,
+          current_owner_address = EXCLUDED.current_owner_address,
+          current_owner_script_pubkey = EXCLUDED.current_owner_script_pubkey,
+          record_json = EXCLUDED.record_json,
+          updated_at = now()`,
         [manifestName, json]
       );
+      touchedRows += rows.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE).length;
       continue;
     }
     if (table === "indexer_read_utxos") {
@@ -712,11 +784,83 @@ async function materializeReadModelTable({ client, manifestName, table, rows }) 
               inscription_number BIGINT,
               transfer_lot_id TEXT,
               record_json JSONB
-            )`,
+            )
+       ON CONFLICT (manifest_name, outpoint) DO UPDATE SET
+          txid = EXCLUDED.txid,
+          vout = EXCLUDED.vout,
+          address = EXCLUDED.address,
+          script_pubkey = EXCLUDED.script_pubkey,
+          value_grain = EXCLUDED.value_grain,
+          block_height = EXCLUDED.block_height,
+          confirmations = EXCLUDED.confirmations,
+          coinbase = EXCLUDED.coinbase,
+          spendable = EXCLUDED.spendable,
+          protected = EXCLUDED.protected,
+          protection_reason = EXCLUDED.protection_reason,
+          inscription_id = EXCLUDED.inscription_id,
+          inscription_number = EXCLUDED.inscription_number,
+          transfer_lot_id = EXCLUDED.transfer_lot_id,
+          record_json = EXCLUDED.record_json,
+          updated_at = now()`,
         [manifestName, json]
       );
+      touchedRows += rows.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE).length;
     }
   }
+  return touchedRows;
+}
+
+async function applyReadModelDelta(client, manifestName, snapshot, delta = {}) {
+  const inscriptionRows = inscriptionReadRows(snapshot);
+  const touchedRows = {
+    inscriptions: await upsertReadModelRows({
+      client,
+      manifestName,
+      table: "indexer_read_inscriptions",
+      rows: inscriptionRows
+    }),
+    utxos: 0
+  };
+
+  const touchedOutpoints = uniqueStrings(delta.utxos);
+  if (touchedOutpoints.length > 0) {
+    for (let offset = 0; offset < touchedOutpoints.length; offset += READ_MODEL_INSERT_CHUNK_SIZE) {
+      const chunk = touchedOutpoints.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE);
+      const result = await client.query(
+        "DELETE FROM indexer_read_utxos WHERE manifest_name = $1 AND outpoint = ANY($2::text[])",
+        [manifestName, chunk]
+      );
+      touchedRows.utxos += Number(result.rowCount ?? 0);
+    }
+    const utxoRows = utxoReadRowsForOutpoints(snapshot, touchedOutpoints);
+    touchedRows.utxos += await upsertReadModelRows({
+      client,
+      manifestName,
+      table: "indexer_read_utxos",
+      rows: utxoRows
+    });
+  }
+
+  touchedRows.utxos += await applyCoinbaseMaturityUpdate(
+    client,
+    manifestName,
+    safeIntegerOrNull(delta.bestHeight ?? delta.indexedHeight ?? snapshot.network?.indexedHeight),
+    safeIntegerOrNull(delta.previousBestHeight ?? delta.previousIndexedHeight)
+  );
+  return touchedRows;
+}
+
+async function upsertReadModelRows({ client, manifestName, table, rows }) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return 0;
+  }
+  let touchedRows = 0;
+  for (let offset = 0; offset < rows.length; offset += READ_MODEL_INSERT_CHUNK_SIZE) {
+    const chunk = rows.slice(offset, offset + READ_MODEL_INSERT_CHUNK_SIZE);
+    await materializeReadModelTable({ client, manifestName, table, rows: chunk, skipDelete: true });
+    touchedRows += chunk.length;
+  }
+  return touchedRows;
 }
 
 function inscriptionReadRows(snapshot) {
@@ -770,6 +914,9 @@ function publicInscriptionReadRecord(inscription) {
 }
 
 function utxoReadRows(snapshot) {
+  if (snapshot?.utxos === skipUtxoMapSymbol()) {
+    return utxoReadRowsFromIndexes(snapshot);
+  }
   const rows = [];
   for (const [address, utxos] of Object.entries(snapshot.utxos ?? {})) {
     if (!Array.isArray(utxos)) {
@@ -807,6 +954,111 @@ function utxoReadRows(snapshot) {
   return rows;
 }
 
+function utxoReadRowsForOutpoints(snapshot, outpoints) {
+  return utxoReadRowsFromIndexes(snapshot, uniqueStrings(outpoints));
+}
+
+function utxoReadRowsFromIndexes(snapshot, outpoints = null) {
+  const rows = [];
+  const outputs = snapshot?.outputsByOutpoint ?? {};
+  const spends = snapshot?.spendsByOutpoint ?? {};
+  const bestHeight = safeIntegerOrNull(snapshot?.network?.indexedHeight ?? snapshot?.network?.bestHeight);
+  const protectionByOutpoint = readModelProtectionIndex(snapshot);
+  const candidates = outpoints === null ? Object.keys(outputs) : outpoints;
+
+  for (const outpoint of candidates) {
+    const normalizedOutpoint = normalizeOptionalText(outpoint);
+    if (!normalizedOutpoint || spends[normalizedOutpoint]) {
+      continue;
+    }
+    const output = outputs[normalizedOutpoint];
+    if (!output?.address) {
+      continue;
+    }
+    const txid = normalizeOptionalText(output.txid);
+    const vout = safeIntegerOrNull(output.vout);
+    if (!txid || vout === null) {
+      continue;
+    }
+    const valueGrain = numericStringOrNull(output.valueGrain ?? "0") ?? "0";
+    const blockHeight = safeIntegerOrNull(output.blockHeight);
+    const confirmations =
+      bestHeight === null || blockHeight === null ? 0 : Math.max(0, bestHeight - blockHeight + 1);
+    const coinbase = Boolean(output.coinbase);
+    const protection = protectionByOutpoint.get(normalizedOutpoint) ?? null;
+    const protectedUtxo = Boolean(protection);
+    const spendable = (!coinbase || confirmations >= 100) && !protectedUtxo;
+    const record = {
+      key: normalizedOutpoint,
+      outpoint: normalizedOutpoint,
+      txid,
+      vout,
+      address: output.address,
+      scriptPubKey: output.scriptPubKey ?? null,
+      valueGrain,
+      valuePrl: output.valuePrl ?? grainToPrl(valueGrain),
+      blockHeight,
+      confirmations,
+      coinbase,
+      spendable,
+      protected: protectedUtxo,
+      protectionReason: protection?.protectionReason ?? null,
+      inscriptionId: protection?.inscriptionId ?? null,
+      inscriptionNumber: protection?.inscriptionNumber ?? null,
+      transferLotId: protection?.transferLotId ?? null,
+      source: "snapshot-utxo-read-model"
+    };
+    rows.push({
+      outpoint: normalizedOutpoint,
+      txid,
+      vout,
+      address: normalizeOptionalText(record.address),
+      script_pubkey: normalizeOptionalText(record.scriptPubKey),
+      value_grain: valueGrain,
+      block_height: blockHeight,
+      confirmations,
+      coinbase,
+      spendable,
+      protected: protectedUtxo,
+      protection_reason: normalizeOptionalText(record.protectionReason),
+      inscription_id: normalizeOptionalText(record.inscriptionId),
+      inscription_number: safeIntegerOrNull(record.inscriptionNumber),
+      transfer_lot_id: normalizeOptionalText(record.transferLotId),
+      record_json: record
+    });
+  }
+  return rows;
+}
+
+function readModelProtectionIndex(snapshot) {
+  const protectionByOutpoint = new Map();
+  for (const inscription of snapshot?.inscriptions ?? []) {
+    const outpoint = normalizeOptionalText(inscription.currentOutpoint ?? inscription.ownerOutpoint);
+    if (!outpoint) {
+      continue;
+    }
+    protectionByOutpoint.set(outpoint, {
+      protectionReason: "INSCRIPTION_UTXO",
+      inscriptionId: inscription.id ?? inscription.inscriptionId ?? null,
+      inscriptionNumber: inscription.inscriptionNumber ?? null,
+      transferLotId: null
+    });
+  }
+  for (const lot of snapshot?.transferLots ?? []) {
+    const outpoint = normalizeOptionalText(lot.currentOutpoint);
+    if (lot.status !== "transferable" || !outpoint) {
+      continue;
+    }
+    protectionByOutpoint.set(outpoint, {
+      protectionReason: "PRL20_TRANSFER_LOT_UTXO",
+      inscriptionId: lot.inscriptionId ?? lot.id ?? null,
+      inscriptionNumber: lot.inscriptionNumber ?? null,
+      transferLotId: lot.id ?? lot.inscriptionId ?? null
+    });
+  }
+  return protectionByOutpoint;
+}
+
 function publicUtxoReadRecord(utxo, normalized) {
   return {
     ...utxo,
@@ -829,6 +1081,89 @@ function publicUtxoReadRecord(utxo, normalized) {
     transferLotId: utxo.transferLotId ?? null,
     source: utxo.source ?? "indexer-read-model"
   };
+}
+
+async function applyCoinbaseMaturityUpdate(client, manifestName, bestHeight, previousBestHeight = null) {
+  if (bestHeight === null || bestHeight === undefined) {
+    return 0;
+  }
+  const matureThrough = Number(bestHeight) - 99;
+  if (!Number.isSafeInteger(matureThrough) || matureThrough < 0) {
+    return 0;
+  }
+  const previousMatureThrough =
+    previousBestHeight === null || previousBestHeight === undefined ? null : Number(previousBestHeight) - 99;
+  const params = [manifestName, matureThrough];
+  let lowerBoundSql = "";
+  if (Number.isSafeInteger(previousMatureThrough)) {
+    params.push(previousMatureThrough);
+    lowerBoundSql = ` AND block_height > $${params.length}`;
+  }
+  const result = await client.query(
+    `UPDATE indexer_read_utxos
+        SET spendable = TRUE,
+            record_json = jsonb_set(record_json, '{spendable}', 'true'::jsonb, true),
+            updated_at = now()
+      WHERE manifest_name = $1
+        AND coinbase = TRUE
+        AND protected = FALSE
+        AND spendable = FALSE
+        AND block_height IS NOT NULL
+        AND block_height <= $2${lowerBoundSql}`,
+    params
+  );
+  return Number(result.rowCount ?? 0);
+}
+
+function withRuntimeUtxoState(record, bestHeight, row = {}) {
+  const blockHeight = safeIntegerOrNull(record?.blockHeight ?? row.block_height);
+  const confirmations =
+    bestHeight === null || bestHeight === undefined || blockHeight === null
+      ? safeIntegerOrNull(record?.confirmations) ?? 0
+      : Math.max(0, Number(bestHeight) - blockHeight + 1);
+  const coinbase = Boolean(record?.coinbase ?? row.coinbase);
+  const protectedUtxo = Boolean(record?.protected ?? row.protected);
+  return {
+    ...record,
+    confirmations,
+    spendable: (!coinbase || confirmations >= 100) && !protectedUtxo
+  };
+}
+
+export function readModelParityDigestFromSnapshot(snapshot) {
+  const bestHeight = safeIntegerOrNull(snapshot?.network?.indexedHeight ?? snapshot?.network?.bestHeight);
+  return readModelDigest({
+    inscriptions: inscriptionReadRows(snapshot).map((row) => row.record_json),
+    utxos: utxoReadRows(snapshot)
+      .map((row) => withRuntimeUtxoState(row.record_json, bestHeight, row))
+      .sort((left, right) => String(left.outpoint).localeCompare(String(right.outpoint)))
+  });
+}
+
+function readModelDigest(value) {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function stableStringify(value) {
+  if (value === undefined) {
+    return "null";
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const keys = Object.keys(value).filter((key) => value[key] !== undefined).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function uniqueStrings(values) {
+  return [...new Set((values ?? []).map((value) => normalizeOptionalText(value)).filter(Boolean))];
+}
+
+function skipUtxoMapSymbol() {
+  return Symbol.for("prl20.skipUtxoMap");
 }
 
 function parseReadPagination(searchParams, { defaultLimit, maxLimit }) {
@@ -885,6 +1220,9 @@ function normalizeJsonObject(value) {
 }
 
 function safeIntegerOrNull(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
   const number = Number(value);
   return Number.isSafeInteger(number) ? number : null;
 }

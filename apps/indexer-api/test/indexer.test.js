@@ -116,6 +116,13 @@ test("public Postgres schema does not contain marketplace tables", () => {
   assert.doesNotMatch(schema, /\bindexer_read_market_events\b/);
 });
 
+test("public Postgres schema keeps the coinbase maturity update indexed", () => {
+  const schema = readFileSync(schemaPath, "utf8");
+
+  assert.match(schema, /\bindexer_read_utxos_coinbase_maturity_idx\b/);
+  assert.match(schema, /WHERE coinbase = TRUE\s+AND protected = FALSE\s+AND spendable = FALSE/s);
+});
+
 test("generic PRL-20 token routes expose progress, holders, and generic balances", () => {
   const fixture = {
     network: { chain: "pearl-mock" },
