@@ -45,6 +45,8 @@ export async function createPublicIndexerRuntime(config = loadPublicIndexerConfi
       chain: config.chain,
       startHeight: config.startHeight,
       batchSize: config.batchSize,
+      maxBlocksPerSync: config.maxBlocksPerSync,
+      parityMode: config.parityMode,
       mintFeePolicy: config.mintFeePolicy,
       // MoE hard fork advisory inputs (additive). Surfaced in status/health and
       // used for the anti-old-chain checkpoint check; never alter PRL-20 state.

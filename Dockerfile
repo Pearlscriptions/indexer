@@ -1,6 +1,6 @@
 # Public Pearlscriptions indexer — read-only API / sync worker.
-# Used by the optional "app" compose profile to run the v1.2.1 API/worker split.
-FROM node:20-alpine
+# Used by the optional "app" compose profile to run the API/worker split.
+FROM node:22-alpine
 
 WORKDIR /app
 

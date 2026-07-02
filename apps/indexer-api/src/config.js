@@ -56,7 +56,7 @@ export function loadPublicIndexerConfig(env = undefined, options = {}) {
     mintFeePolicy,
     // MoE hard fork advisory node-compat (cross-repo frozen contract).
     // canonicalCheckpoints are part of the hashed manifest above, so they also
-    // shift manifestDigest (a second signal for the private registry checker).
+    // shift manifestDigest (a second signal for operator registry checkers).
     canonicalCheckpoints,
     forkEra,
     operator: loadOperatorMetadata(env),
@@ -92,6 +92,11 @@ export function loadPublicIndexerConfig(env = undefined, options = {}) {
       min: 1,
       max: 1000
     }),
+    maxBlocksPerSync: parseInteger(env.PRL20_INDEXER_MAX_BLOCKS_PER_SYNC, 0, {
+      min: 0,
+      max: 1000
+    }),
+    parityMode: parseParityMode(env.PRL20_INDEXER_PARITY_MODE),
     backgroundSyncMs: parseInteger(env.PRL20_INDEXER_BACKGROUND_SYNC_MS, 30_000, {
       min: 0,
       max: 24 * 60 * 60 * 1000
@@ -239,6 +244,21 @@ function parseRole(value) {
     );
   }
   return role;
+}
+
+const PARITY_MODES = new Set(["inline", "post-publish", "off"]);
+
+function parseParityMode(value) {
+  const mode = String(value ?? "").trim().toLowerCase();
+  if (mode === "") {
+    return "inline";
+  }
+  if (!PARITY_MODES.has(mode)) {
+    throw new Error(
+      `invalid PRL20_INDEXER_PARITY_MODE "${value}"; expected one of inline, post-publish, off`
+    );
+  }
+  return mode;
 }
 
 function emptyToNull(value) {

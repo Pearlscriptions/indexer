@@ -15,7 +15,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # Optional v1.2.1+ API/worker split. Enable with:  docker compose --profile app up
+  # Optional API/worker split. Enable with:  docker compose --profile app up
   # Bring your own pearld >= v1.1.0 node and set PEARL_RPC_URL/USER/PASSWORD in .env
   # (the MoE hard fork requires pearld >= v1.1.0). The api service serves read-only
   # from shared Postgres state; the worker service is the sole sync writer.

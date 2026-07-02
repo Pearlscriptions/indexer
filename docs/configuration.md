@@ -51,6 +51,8 @@ tests and smoke checks, not for a live operator endpoint.
 | `PRL20_INDEXER_SYNC_ON_START` | `1` | Set `0` to load stored state without syncing on boot. |
 | `PRL20_INDEXER_REBUILD_CHUNK_SIZE` | `250` | Blocks folded per chunk during cold-start/full rebuild, clamped to `1-5000`. |
 | `PRL20_INDEXER_READ_MODEL_MODE` | `full` | Set `incremental` on a Postgres sync worker to publish only touched read-model UTXOs on pure append syncs. Reorgs and cold starts still publish full read models. |
+| `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC` | `0` | Optional warm-session micro-batch limit, clamped to `0-1000`. `0` disables the limit. Cold starts and rollback recovery still catch up fully. |
+| `PRL20_INDEXER_PARITY_MODE` | `inline` | Optional protocol parity timing: `inline`, `post-publish`, or `off`. Use `post-publish` with a parity cadence to publish append blocks before running the extra full-rebuild check. |
 | `PRL20_INDEXER_PARITY_CHECK_EVERY_N_BLOCKS` | `0` | Optional safety cadence for protocol/read-model parity checks. `0` disables the extra check. |
 
 `PRL20_INDEXER_READ_MODEL_MODE=incremental` is an operator performance flag, not
@@ -63,12 +65,19 @@ Recommended production rollout:
 1. Upgrade and run `npm run db:migrate` to add the optional v1.3.0 read-model
    performance index.
 2. Let the worker complete one normal full publish.
-3. Set `PRL20_INDEXER_READ_MODEL_MODE=incremental` only on the private sync
-   worker.
-4. Restart the worker and watch `readModelMode`, `readModelMs`, `touchedRows`,
-   lag, RSS memory, and API status.
-5. Roll back by unsetting the flag or setting it to `full`, then restarting the
-   worker. No data deletion is required.
+3. Set realtime flags only on the private sync worker:
+   `PRL20_INDEXER_READ_MODEL_MODE=incremental`,
+   `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=1`, and
+   `PRL20_INDEXER_PARITY_MODE=post-publish`.
+4. Keep `PRL20_INDEXER_PARITY_CHECK_EVERY_N_BLOCKS=0` for the lowest overhead,
+   or set a positive cadence if you want periodic full-rebuild parity checks.
+5. Restart the worker and watch `readModelMode`, `targetHeight`,
+   `remainingLag`, `readModelMs`, `touchedRows`, `timings`, RSS memory, and API
+   status.
+6. Roll back by unsetting the flags or setting `PRL20_INDEXER_READ_MODEL_MODE=full`,
+   `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=0`, and
+   `PRL20_INDEXER_PARITY_MODE=inline`, then restarting the worker. No data
+   deletion is required.
 
 ## Optional Operator Registry Metadata
 

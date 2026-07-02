@@ -87,7 +87,7 @@ export function createReadOnlyApi({
 
       if (url.pathname === "/indexer/digest") {
         // MoE hard fork: expose checkpoint + forkEra as SIBLING keys so the
-        // private registry checker can derive states. These are pulled from
+        // operator registry checker can derive states. These are pulled from
         // status and are explicitly NOT part of snapshotDigest (the digest only
         // covers the protocol snapshot allowlist). The digest itself stays
         // byte-identical for the same chain.
@@ -196,7 +196,7 @@ async function safeStatus(getStatus) {
 }
 
 // MoE hard fork: the checkpoint + forkEra siblings the digest endpoint exposes
-// for the private registry checker. Loosely shaped; never folded into the digest.
+// for the operator registry checker. Loosely shaped; never folded into the digest.
 // forkEra falls back to the statically configured era when status omits it.
 function digestAdvisoryFields(status, configuredForkEra = null) {
   return {

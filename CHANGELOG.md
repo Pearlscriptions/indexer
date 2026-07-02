@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.3.1 - 2026-06-28
+
+Realtime worker hardening release. No PRL-20 consensus or protocol change: the
+derived snapshot digest stays byte-identical for the same chain.
+
+Performance / stability:
+
+- Added optional warm-session micro-batching via
+  `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC`. The default `0` preserves the existing
+  catch-up behavior. When set to a positive value, only append-only warm
+  backlogs are published in small slices; cold starts and rollback recovery
+  still catch up fully.
+- Added `PRL20_INDEXER_PARITY_MODE=post-publish` so optional protocol parity can
+  run after an incremental publish lands. On mismatch, the worker immediately
+  writes the trusted full rebuild.
+- Avoided needless full re-folds when a live session is already in sync with the
+  stored canonical chain.
+- CLI `sync` and `worker` output now include `targetHeight`,
+  `maxBlocksPerSync`, `remainingLag`, `timings`, and process memory summary.
+- Aligned the Docker image with the package runtime requirement (`node >=22`).
+- Trimmed future registry mutation-planning documentation from the public
+  package so the repo stays focused on the read-only indexer surface.
+
+Operator notes:
+
+- Recommended low-latency worker profile:
+  `PRL20_INDEXER_READ_MODEL_MODE=incremental`,
+  `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=1`,
+  `PRL20_INDEXER_PARITY_MODE=post-publish`.
+- Keep public API processes read-only (`PRL20_INDEXER_ROLE=api`) and enable the
+  realtime flags only on the private sync worker.
+- Rollback is immediate: unset the new flags, or set
+  `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=0` and `PRL20_INDEXER_PARITY_MODE=inline`,
+  then restart the worker.
+
+Security boundary:
+
+This release keeps the public indexer read-only and does not add wallet signing,
+transaction broadcast, marketplace settlement, registry backend mutation, or
+rewards logic. The new flags affect only sync-worker scheduling, parity timing,
+and operator telemetry.
+
 ## v1.3.0 - 2026-06-25
 
 Postgres read-model performance release. No PRL-20 consensus or protocol

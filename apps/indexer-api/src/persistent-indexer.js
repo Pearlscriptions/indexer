@@ -35,6 +35,8 @@ export class PersistentPrl20Indexer {
     mintFeePolicy = PRLS_MINT_FEE_POLICY,
     rebuildChunkSize,
     parityCheckEveryNBlocks,
+    parityMode,
+    maxBlocksPerSync,
     // MoE hard fork advisory inputs (all optional / additive). canonicalCheckpoints
     // are the normalized pins from config ({ height, hash, placeholder }); forkEra
     // and indexerVersion are surfaced verbatim in status. None of these ever
@@ -58,6 +60,16 @@ export class PersistentPrl20Indexer {
     this.chain = chain;
     this.startHeight = normalizeNonNegativeInteger(startHeight, "startHeight");
     this.batchSize = Math.max(1, Math.min(1000, normalizeNonNegativeInteger(batchSize, "batchSize")));
+    const maxBlocksEnvRaw = Number(process.env.PRL20_INDEXER_MAX_BLOCKS_PER_SYNC);
+    const maxBlocksEnv =
+      Number.isInteger(maxBlocksEnvRaw) && maxBlocksEnvRaw > 0 ? maxBlocksEnvRaw : 0;
+    this.maxBlocksPerSync = Math.max(
+      0,
+      Math.min(
+        1000,
+        normalizeNonNegativeInteger(maxBlocksPerSync ?? maxBlocksEnv, "maxBlocksPerSync")
+      )
+    );
     this.mintFeePolicy = mintFeePolicy;
     // Full rebuilds read and fold canonical blocks in bounded chunks so the
     // worker never holds the entire raw-block history in memory at once (that
@@ -93,9 +105,17 @@ export class PersistentPrl20Indexer {
       process.env.PRL20_INDEXER_READ_MODEL_MODE === "incremental" ? "incremental" : "full";
     this.blocksAppliedSinceParityCheck = 0;
     this.log = log;
+    this.parityMode = normalizeParityMode(parityMode ?? process.env.PRL20_INDEXER_PARITY_MODE);
     // Observability hook for tests: records which ingest path the last sync took
     // ("incremental" | "full-rebuild").
     this.lastIngestPath = null;
+    this.lastSyncTimings = null;
+    this.lastSyncMemory = null;
+    // Protocol parity can run after the incremental read-model write in
+    // post-publish mode. This keeps realtime publishes quick while still
+    // falling back to a full write if the deterministic digest diverges.
+    this.pendingReadModelParitySnapshot = null;
+    this.pendingPostPublishProtocolParity = null;
 
     // --- MoE hard fork advisory status (ADVISORY ONLY; never alters parsing,
     // balances, or rollback). ---
@@ -150,14 +170,38 @@ export class PersistentPrl20Indexer {
   }
 
   async syncToTipUnsafe() {
+    const syncStartedAt = Date.now();
+    const timings = {
+      loadMs: 0,
+      bestHeightMs: 0,
+      rollbackMs: 0,
+      appendMs: 0,
+      materializeMs: 0,
+      writeSnapshotMs: 0,
+      protocolParityMs: 0,
+      readModelParityMs: 0,
+      totalMs: 0
+    };
+    const mark = () => Date.now();
+    let stepStartedAt = mark();
     await this.load({ refresh: true });
+    timings.loadMs = mark() - stepStartedAt;
+
+    stepStartedAt = mark();
     const bestHeight = normalizeNonNegativeInteger(
       await this.pearlRpc("getblockcount", []),
       "bestHeight"
     );
+    timings.bestHeightMs = mark() - stepStartedAt;
 
+    stepStartedAt = mark();
     const rollbackChanged = await this.rollbackDisconnectedTip(bestHeight);
-    const appendChanged = await this.appendMissingBlocks(bestHeight);
+    timings.rollbackMs = mark() - stepStartedAt;
+
+    const targetHeight = this.syncTargetHeight(bestHeight);
+    stepStartedAt = mark();
+    const appendChanged = await this.appendMissingBlocks(targetHeight);
+    timings.appendMs = mark() - stepStartedAt;
 
     // MoE hard fork advisory checks (run inside the existing sync lock, after the
     // chain work settles, on every sync regardless of which snapshot path is
@@ -177,36 +221,64 @@ export class PersistentPrl20Indexer {
             await this.storage.writeSnapshot(refreshedSnapshot);
           }
         }
+        timings.totalMs = Date.now() - syncStartedAt;
+        this.lastSyncTimings = timings;
+        this.lastSyncMemory = processMemorySummary();
         return {
           bestHeight,
+          targetHeight,
+          maxBlocksPerSync: this.maxBlocksPerSync,
+          remainingLag: remainingLag(this.manifest.indexedHeight, bestHeight),
           startHeight: this.manifest.startHeight,
           indexedHeight: this.manifest.indexedHeight,
           indexedHash: this.manifest.indexedHash,
           blocks: [],
           snapshot: refreshedSnapshot,
-          status: this.buildStatus(bestHeight)
+          status: this.buildStatus(bestHeight),
+          timings,
+          memory: this.lastSyncMemory
         };
       }
     }
 
+    stepStartedAt = mark();
     const { snapshot, blocks, blockCount, writeOptions } = await this.materializeSnapshot(
       bestHeight,
       rollbackChanged
     );
+    timings.materializeMs = mark() - stepStartedAt;
+    stepStartedAt = mark();
     let writeResult = await this.storage.writeSnapshot(snapshot, writeOptions);
+    timings.writeSnapshotMs = mark() - stepStartedAt;
     let finalSnapshot = snapshot;
     let finalBlockCount = blockCount ?? blocks.length;
+    stepStartedAt = mark();
+    const protocolParityResult = await this.maybePostPublishProtocolParityCheck(bestHeight);
+    timings.protocolParityMs = mark() - stepStartedAt;
+    if (protocolParityResult?.snapshot) {
+      finalSnapshot = protocolParityResult.snapshot;
+      finalBlockCount = protocolParityResult.blockCount ?? finalBlockCount;
+      writeResult = protocolParityResult.writeResult ?? writeResult;
+    }
     if (writeOptions?.readModelMode === "incremental") {
-      const parityResult = await this.maybeReadModelParityCheck(snapshot, bestHeight);
+      stepStartedAt = mark();
+      const parityResult = await this.maybeReadModelParityCheck(bestHeight);
+      timings.readModelParityMs = mark() - stepStartedAt;
       if (parityResult?.snapshot) {
         finalSnapshot = parityResult.snapshot;
         finalBlockCount = parityResult.blockCount ?? finalBlockCount;
         writeResult = parityResult.writeResult ?? writeResult;
       }
     }
+    timings.totalMs = Date.now() - syncStartedAt;
+    this.lastSyncTimings = timings;
+    this.lastSyncMemory = processMemorySummary();
 
     return {
       bestHeight,
+      targetHeight,
+      maxBlocksPerSync: this.maxBlocksPerSync,
+      remainingLag: remainingLag(this.manifest.indexedHeight, bestHeight),
       startHeight: this.manifest.startHeight,
       indexedHeight: this.manifest.indexedHeight,
       indexedHash: this.manifest.indexedHash,
@@ -216,8 +288,32 @@ export class PersistentPrl20Indexer {
       status: this.buildStatus(bestHeight),
       readModelMs: writeResult?.readModelMs ?? null,
       touchedRows: writeResult?.touchedRows ?? null,
-      readModelMode: writeResult?.readModels?.mode ?? null
+      readModelMode: writeResult?.readModels?.mode ?? null,
+      timings,
+      memory: this.lastSyncMemory
     };
+  }
+
+  syncTargetHeight(bestHeight) {
+    const normalizedBestHeight = normalizeNonNegativeInteger(bestHeight, "bestHeight");
+    if (this.maxBlocksPerSync <= 0) {
+      return normalizedBestHeight;
+    }
+    // Cold starts and rollback recovery keep the existing full catch-up path.
+    // Micro-batching is only for a warm, append-only session so a backlog can
+    // publish one small confirmed slice per tick instead of waiting for all
+    // missing blocks to finish.
+    if (!this.ingestSession || !this.sessionExtendsStoredChain()) {
+      return normalizedBestHeight;
+    }
+    const nextHeight =
+      this.manifest.blocks.length === 0
+        ? this.manifest.startHeight
+        : this.manifest.blocks.at(-1).height + 1;
+    if (nextHeight > normalizedBestHeight) {
+      return normalizedBestHeight;
+    }
+    return Math.min(normalizedBestHeight, nextHeight + this.maxBlocksPerSync - 1);
   }
 
   // MoE hard fork anti-old-chain check (ADVISORY ONLY).
@@ -371,20 +467,31 @@ export class PersistentPrl20Indexer {
       : this.manifest.blocks;
 
     if (sessionInSync && appendedManifestBlocks.length === 0) {
-      // No new blocks since the session last published. Backends with
-      // materialized read models (postgres) keep the legacy reconciliation path
-      // so a stale stored snapshot is rebuilt from canonical blocks; the
-      // in-memory json worker simply republishes the live accumulators
-      // (O(state), no O(history) re-fold).
-      if (this.storage.publicStatus?.().readModels === true) {
-        return this.rebuildSnapshot(bestHeight);
-      }
+      // No new blocks and the in-memory session already matches the stored
+      // canonical chain. This stays cheap for Postgres read models too: if a
+      // previous snapshot was stale, the live session can publish the current
+      // metadata without a full re-fold from genesis.
       this.lastIngestPath = "incremental";
+      const canUseIncrementalReadModel = this.canUseIncrementalReadModel();
+      const delta = canUseIncrementalReadModel ? this.ingestSession.consumeReadModelDelta() : null;
       return {
-        snapshot: this.publishSessionSnapshot(bestHeight),
+        snapshot: this.publishSessionSnapshot(bestHeight, {
+          skipUtxos: canUseIncrementalReadModel
+        }),
         blocks: [],
         blockCount: 0,
-        writeOptions: { readModelMode: "full" }
+        writeOptions: canUseIncrementalReadModel
+          ? {
+              readModelMode: "incremental",
+              readModelDelta: {
+                ...delta,
+                previousIndexedHeight: this.manifest.indexedHeight,
+                previousBestHeight: this.manifest.indexedHeight,
+                indexedHeight: this.manifest.indexedHeight,
+                bestHeight
+              }
+            }
+          : { readModelMode: "full" }
       };
     }
 
@@ -510,7 +617,9 @@ export class PersistentPrl20Indexer {
 
   // Optional safety net: every N appended blocks, also run a full chunked rebuild
   // and compare protocol digests. On mismatch, keep the full-rebuild result,
-  // reset the session, and log a structured error.
+  // reset the session, and log a structured error. In post-publish mode the
+  // rebuild runs immediately after the incremental snapshot lands, reducing the
+  // time users wait for confirmed blocks while preserving the same fallback.
   async maybeParityCheck(incrementalSnapshot, bestHeight) {
     if (
       this.parityCheckEveryNBlocks <= 0 ||
@@ -519,6 +628,31 @@ export class PersistentPrl20Indexer {
       return incrementalSnapshot;
     }
     this.blocksAppliedSinceParityCheck = 0;
+    this.pendingReadModelParitySnapshot = null;
+    this.pendingPostPublishProtocolParity = null;
+
+    if (this.parityMode === "off") {
+      this.log?.warn?.(
+        JSON.stringify({
+          evt: "indexer-incremental-parity-skipped",
+          mode: this.parityMode,
+          indexedHeight: this.manifest.indexedHeight,
+          indexedHash: this.manifest.indexedHash
+        })
+      );
+      return incrementalSnapshot;
+    }
+
+    if (this.parityMode === "post-publish") {
+      this.pendingPostPublishProtocolParity = {
+        bestHeight,
+        incrementalDigest: snapshotDigest(
+          normalizeProtocolSnapshotForComparison(incrementalSnapshot)
+        )
+      };
+      return incrementalSnapshot;
+    }
+
     const sessionSnapshot = this.ingestSession;
     const sessionBlocks = this.sessionBlocks;
     this.ingestSession = null;
@@ -545,7 +679,49 @@ export class PersistentPrl20Indexer {
     this.ingestSession = sessionSnapshot;
     this.sessionBlocks = sessionBlocks;
     this.lastIngestPath = "incremental";
+    this.pendingReadModelParitySnapshot = rebuilt;
     return incrementalSnapshot;
+  }
+
+  async maybePostPublishProtocolParityCheck(bestHeight) {
+    const pending = this.pendingPostPublishProtocolParity;
+    this.pendingPostPublishProtocolParity = null;
+    if (!pending || this.parityMode !== "post-publish") {
+      return null;
+    }
+
+    const sessionSnapshot = this.ingestSession;
+    const sessionBlocks = this.sessionBlocks;
+    this.ingestSession = null;
+    this.sessionBlocks = [];
+    const rebuilt = await this.rebuildSnapshot(bestHeight);
+    const rebuiltDigest = snapshotDigest(normalizeProtocolSnapshotForComparison(rebuilt.snapshot));
+    if (pending.incrementalDigest !== rebuiltDigest) {
+      this.log?.error?.(
+        JSON.stringify({
+          evt: "indexer-incremental-parity-mismatch",
+          mode: this.parityMode,
+          indexedHeight: this.manifest.indexedHeight,
+          indexedHash: this.manifest.indexedHash,
+          incrementalDigest: pending.incrementalDigest,
+          rebuiltDigest
+        })
+      );
+      const writeResult = await this.storage.writeSnapshot(rebuilt.snapshot, {
+        readModelMode: "full"
+      });
+      return {
+        snapshot: rebuilt.snapshot,
+        blockCount: rebuilt.blockCount,
+        writeResult
+      };
+    }
+
+    this.ingestSession = sessionSnapshot;
+    this.sessionBlocks = sessionBlocks;
+    this.lastIngestPath = "incremental";
+    this.pendingReadModelParitySnapshot = rebuilt.snapshot;
+    return null;
   }
 
   canUseIncrementalReadModel() {
@@ -557,15 +733,31 @@ export class PersistentPrl20Indexer {
     );
   }
 
-  async maybeReadModelParityCheck(incrementalSnapshot, bestHeight) {
+  storageSupportsReadModelParity() {
+    const storageStatus = this.storage.publicStatus?.() ?? {};
+    return (
+      storageStatus.backend === "postgres" &&
+      storageStatus.readModels === true &&
+      typeof this.storage.readModelParityDigest === "function"
+    );
+  }
+
+  async maybeReadModelParityCheck(bestHeight) {
+    const rebuiltSnapshot = this.pendingReadModelParitySnapshot;
+    this.pendingReadModelParitySnapshot = null;
     if (
-      this.parityCheckEveryNBlocks <= 0 ||
-      typeof this.storage.readModelParityDigest !== "function"
+      !rebuiltSnapshot ||
+      this.readModelMode !== "incremental" ||
+      !this.storageSupportsReadModelParity()
     ) {
       return null;
     }
+    return this.checkReadModelParity(rebuiltSnapshot, bestHeight);
+  }
+
+  async checkReadModelParity(rebuiltSnapshot, bestHeight) {
     const dbDigest = await this.storage.readModelParityDigest();
-    const truthDigest = readModelParityDigestFromSnapshot(incrementalSnapshot);
+    const truthDigest = readModelParityDigestFromSnapshot(rebuiltSnapshot);
     if (dbDigest === truthDigest) {
       return null;
     }
@@ -578,13 +770,12 @@ export class PersistentPrl20Indexer {
         truthDigest
       })
     );
-    const rebuilt = await this.rebuildSnapshot(bestHeight);
-    const writeResult = await this.storage.writeSnapshot(rebuilt.snapshot, {
+    const writeResult = await this.storage.writeSnapshot(rebuiltSnapshot, {
       readModelMode: "full"
     });
     return {
-      snapshot: rebuilt.snapshot,
-      blockCount: rebuilt.blockCount,
+      snapshot: rebuiltSnapshot,
+      blockCount: this.manifest.blocks.length,
       writeResult
     };
   }
@@ -922,6 +1113,40 @@ function normalizeNonNegativeInteger(value, name) {
     throw new Error(`${name} must be a safe non-negative integer`);
   }
   return number;
+}
+
+function normalizeParityMode(value) {
+  const mode = String(value ?? "inline").trim().toLowerCase() || "inline";
+  if (mode === "inline" || mode === "post-publish" || mode === "off") {
+    return mode;
+  }
+  throw new Error(
+    `PRL20_INDEXER_PARITY_MODE must be one of "inline", "post-publish", or "off"; got "${value}"`
+  );
+}
+
+function remainingLag(indexedHeight, bestHeight) {
+  const indexed = Number(indexedHeight);
+  const best = Number(bestHeight);
+  if (!Number.isSafeInteger(indexed) || !Number.isSafeInteger(best)) {
+    return null;
+  }
+  return Math.max(0, best - indexed);
+}
+
+function processMemorySummary() {
+  const memory = process.memoryUsage();
+  return {
+    rssMb: bytesToMiB(memory.rss),
+    heapUsedMb: bytesToMiB(memory.heapUsed),
+    heapTotalMb: bytesToMiB(memory.heapTotal),
+    externalMb: bytesToMiB(memory.external),
+    arrayBuffersMb: bytesToMiB(memory.arrayBuffers ?? 0)
+  };
+}
+
+function bytesToMiB(bytes) {
+  return Math.round((Number(bytes ?? 0) / 1024 / 1024) * 10) / 10;
 }
 
 // Parse "pearld:MAJOR.MINOR.PATCH" out of a btcd-style subversion string such as

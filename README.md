@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <code>v1.3.0</code>
+  <code>v1.3.1</code>
   ·
   <code>node >=22</code>
   ·
@@ -36,7 +36,7 @@
 
 <p align="center">
   Run your own Pearl-backed indexer, reproduce canonical inscription numbers,
-  derive PRL-20 state, and compare deterministic digests with other v1.3.0
+  derive PRL-20 state, and compare deterministic digests with other v1.3.1
   operators.
 </p>
 
@@ -56,13 +56,16 @@ operator registry compatibility surface. Registration,
 monitoring, scoring, and rewards remain official application-layer services
 outside this repository.
 
-The `v1.3.0` release adds optional incremental Postgres read-model publishing
-for operators who run the API/worker split on mainnet. The default remains the
-conservative full publish path; set `PRL20_INDEXER_READ_MODEL_MODE=incremental`
-on the private sync worker to publish only touched UTXO rows on pure append
-syncs. Reorgs and cold starts still use the full path. Existing schemas remain
-compatible; run `npm run db:migrate` after upgrading to add the optional
-read-model performance index. Disabling the flag is the rollback.
+The `v1.3.1` release keeps the v1.3.0 incremental Postgres read-model path and
+adds optional realtime worker hardening for public operators. The default
+remains conservative and unchanged. Operators who run a private sync worker can
+set `PRL20_INDEXER_READ_MODEL_MODE=incremental`,
+`PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=1`, and
+`PRL20_INDEXER_PARITY_MODE=post-publish` to publish warm append backlogs in
+small slices while keeping cold starts, reorgs, and parity fallback on the full
+path. Existing schemas remain compatible; run `npm run db:migrate` after
+upgrading to add the optional read-model performance index. Disabling the flags
+is the rollback.
 
 The public indexer also includes Pearl **MoE hard-fork** node compatibility
 (requires `pearld >= v1.1.0`, activated 2026-06-12), API/worker process split
@@ -261,7 +264,6 @@ Do not commit `.env`.
 | Document | Purpose |
 | --- | --- |
 | [Operator guide](docs/operators.md) | Runbook for syncing, serving, and monitoring an indexer. |
-| [Operator registry v1.1 plan](docs/operator-registry-v1.1-plan.md) | Future registry architecture, proofs, checks, and reward-eligibility planning. |
 | [Operator registry hardening audit](docs/operator-registry-hardening-audit-2026-05-29.md) | Notes on the v1.1.x digest/status hardening pass. |
 | [Operator API / worker split](docs/operator-api-worker-split-2026-05-29.md) | Notes for running the public API and sync worker as separate processes. |
 | [Configuration reference](docs/configuration.md) | Environment variables and runtime defaults. |

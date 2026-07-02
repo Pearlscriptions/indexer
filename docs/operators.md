@@ -79,13 +79,16 @@ npm run indexer:digest
 The digest is the main comparison tool between independent operators. Compare it
 only when indexers report the same Pearl tip height and hash.
 
-## v1.3.0 Read-Model Mode
+## v1.3.1 Realtime Worker Profile
 
-v1.3.0 adds optional incremental Postgres read-model publishing for the private
-sync worker:
+v1.3.1 keeps the v1.3.0 incremental Postgres read-model path and adds optional
+warm-session micro-batching plus post-publish parity timing for the private sync
+worker:
 
 ```text
 PRL20_INDEXER_READ_MODEL_MODE=incremental
+PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=1
+PRL20_INDEXER_PARITY_MODE=post-publish
 ```
 
 Leave the variable unset, or set it to `full`, to keep the older conservative
@@ -94,22 +97,30 @@ operators after the first full publish has completed. It affects only
 materialized read-model tables such as `indexer_read_utxos`; it does not alter
 Pearlscriptions parsing, PRL-20 state, or `/indexer/digest`.
 
+`PRL20_INDEXER_MAX_BLOCKS_PER_SYNC=1` applies only to warm append backlogs. Cold
+starts and rollback recovery still catch up fully. `PRL20_INDEXER_PARITY_MODE`
+controls when the optional full-rebuild parity check runs; `post-publish` lets
+the append publish land first, then falls back to the trusted full rebuild if a
+digest mismatch is detected.
+
 Recommended rollout:
 
-1. Upgrade to v1.3.0.
+1. Upgrade to v1.3.1.
 2. Run `npm run verify`.
 3. Run `npm run db:migrate` to add the optional v1.3.0 read-model performance
    index.
 4. Start the worker once in default `full` mode and let it publish a complete
    snapshot.
-5. Enable `PRL20_INDEXER_READ_MODEL_MODE=incremental` on the private sync
-   worker, not on public API-only processes.
-6. Watch worker output for `readModelMode: "incremental"`, lower `readModelMs`,
-   small `touchedRows.utxos`, no lag growth, and stable memory.
+5. Enable the realtime flags on the private sync worker, not on public API-only
+   processes.
+6. Watch worker output for `readModelMode: "incremental"`, `targetHeight`,
+   `remainingLag`, lower `readModelMs`, small `touchedRows.utxos`, no lag
+   growth, and stable memory.
 
-Rollback is immediate: unset `PRL20_INDEXER_READ_MODEL_MODE` or set it to
-`full`, then restart the worker. No data deletion is required for either
-direction.
+Rollback is immediate: unset the flags, or set `PRL20_INDEXER_READ_MODEL_MODE`
+to `full`, `PRL20_INDEXER_MAX_BLOCKS_PER_SYNC` to `0`, and
+`PRL20_INDEXER_PARITY_MODE` to `inline`, then restart the worker. No data
+deletion is required for either direction.
 
 ## Serve
 

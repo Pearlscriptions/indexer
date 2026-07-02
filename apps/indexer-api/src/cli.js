@@ -37,9 +37,14 @@ export async function runCli(argv = process.argv) {
       ok: true,
       status: sanitize(result.status),
       summary: summarizeSnapshot(result.snapshot),
+      targetHeight: result.targetHeight ?? null,
+      remainingLag: result.remainingLag ?? null,
+      maxBlocksPerSync: result.maxBlocksPerSync ?? null,
       readModelMode: result.readModelMode ?? null,
       readModelMs: result.readModelMs ?? null,
-      touchedRows: result.touchedRows ?? null
+      touchedRows: result.touchedRows ?? null,
+      timings: result.timings ?? null,
+      memory: result.memory ?? null
     });
   } else if (command === "worker") {
     await runWorker();
@@ -120,9 +125,14 @@ export async function runWorkerLoop(indexer, config, options = {}) {
         ok: true,
         evt: "indexer-worker-sync",
         ingestPath: indexer.lastIngestPath,
+        targetHeight: result.targetHeight ?? null,
+        remainingLag: result.remainingLag ?? null,
+        maxBlocksPerSync: result.maxBlocksPerSync ?? null,
         readModelMode: result.readModelMode ?? null,
         readModelMs: result.readModelMs ?? null,
         touchedRows: result.touchedRows ?? null,
+        timings: result.timings ?? null,
+        memory: result.memory ?? null,
         status: sanitize(result.status)
       });
     } catch (error) {
@@ -271,7 +281,8 @@ function summarizeRegistryCheck(mode, targetUrl, checks, warnings, readiness = n
 }
 
 // Exported for tests: this readiness derivation is the reference spec the
-// private registry repo mirrors (including the MoE reference states below).
+// operator registry implementations can mirror (including the MoE reference
+// states below).
 export function buildRegistryReadiness(results, config, targetUrl = null) {
   const health = results.get("/health")?.body ?? null;
   const status = results.get("/indexer/status")?.body ?? null;
@@ -356,7 +367,7 @@ export function buildRegistryReadiness(results, config, targetUrl = null) {
     errors.push("STATUS_DIGEST_NOT_MATCHING");
   }
 
-  // MoE hard fork reference states (this file is the spec the private registry
+  // MoE hard fork reference states (this file is the spec operator registry
   // checker mirrors). Derived from the new advisory status/digest fields and kept
   // DISTINCT from the generic STATUS_/DIGEST_CHAIN_MISMATCH states above:
   //   CANONICAL_CHECKPOINT_MISMATCH - checkpoint.status === 'mismatch' (the
@@ -398,7 +409,7 @@ export function buildRegistryReadiness(results, config, targetUrl = null) {
     digestHeight,
     synced: status?.synced ?? null,
     digestMatchesStatus,
-    // MoE hard fork advisory summary for the private classifier.
+    // MoE hard fork advisory summary for registry classifiers.
     forkEra: status?.forkEra ?? digest?.forkEra ?? operator?.forkEra ?? config.forkEra ?? null,
     checkpointStatus: checkpoint?.status ?? null,
     nodeVersionMeetsMinimum: nodeVersion?.meetsMinimum ?? null,

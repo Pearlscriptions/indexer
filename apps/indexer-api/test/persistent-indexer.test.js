@@ -743,6 +743,125 @@ test("postgres persistent indexer uses incremental read-model publish only when 
   }
 });
 
+test("persistent indexer maxBlocksPerSync preserves full cold-start catch-up", async () => {
+  const storeDir = await mkdtemp(join(tmpdir(), "prl20-indexer-cold-max-blocks-test-"));
+  const firstBlock = block(1, hash("ab01"), null, []);
+  const secondBlock = block(2, hash("ab02"), firstBlock.hash, []);
+  const thirdBlock = block(3, hash("ab03"), secondBlock.hash, []);
+  const indexer = createPersistentPrl20Indexer({
+    pearlRpc: makeRpc([firstBlock, secondBlock, thirdBlock]),
+    storeDir,
+    startHeight: 1,
+    maxBlocksPerSync: 1
+  });
+
+  const result = await indexer.syncToTip();
+
+  assert.equal(result.bestHeight, 3);
+  assert.equal(result.targetHeight, 3);
+  assert.equal(result.indexedHeight, 3);
+  assert.equal(result.remainingLag, 0);
+  assert.equal(result.status.synced, true);
+  assert.equal(result.blockCount, 3);
+});
+
+test("persistent indexer maxBlocksPerSync micro-batches a warm append backlog", async () => {
+  const storeDir = await mkdtemp(join(tmpdir(), "prl20-indexer-warm-max-blocks-test-"));
+  const firstBlock = block(1, hash("ac01"), null, []);
+  const secondBlock = block(2, hash("ac02"), firstBlock.hash, []);
+  const thirdBlock = block(3, hash("ac03"), secondBlock.hash, []);
+  const chainBlocks = [firstBlock];
+  const indexer = createPersistentPrl20Indexer({
+    pearlRpc: makeMutableRpc(chainBlocks),
+    storeDir,
+    startHeight: 1,
+    maxBlocksPerSync: 1
+  });
+
+  const first = await indexer.syncToTip();
+  assert.equal(first.indexedHeight, 1);
+  assert.equal(first.targetHeight, 1);
+
+  chainBlocks.push(secondBlock, thirdBlock);
+  const second = await indexer.syncToTip();
+
+  assert.equal(second.bestHeight, 3);
+  assert.equal(second.targetHeight, 2);
+  assert.equal(second.indexedHeight, 2);
+  assert.equal(second.remainingLag, 1);
+  assert.equal(second.blockCount, 1);
+  assert.equal(second.blocks.length, 1);
+  assert.equal(second.blocks[0].height, 2);
+  assert.equal(second.status.synced, false);
+
+  const third = await indexer.syncToTip();
+
+  assert.equal(third.bestHeight, 3);
+  assert.equal(third.targetHeight, 3);
+  assert.equal(third.indexedHeight, 3);
+  assert.equal(third.remainingLag, 0);
+  assert.equal(third.blockCount, 1);
+  assert.equal(third.status.synced, true);
+});
+
+test("postgres incremental parity can run after the publish without forcing a full write first", async () => {
+  const previousMode = process.env.PRL20_INDEXER_READ_MODEL_MODE;
+  process.env.PRL20_INDEXER_READ_MODEL_MODE = "incremental";
+  try {
+    const pool = new FakePgPool();
+    const storage = new PostgresIndexerStorage({ pool, manifestName: "post-publish-parity-test" });
+    const firstBlock = block(1, hash("ad01"), null, [
+      tx(
+        "tx-deploy",
+        "prl1alice",
+        "5120alice",
+        "{\"p\":\"prl-20\",\"op\":\"deploy\",\"tick\":\"prls\",\"max\":\"2100000000\",\"lim\":\"100000\",\"dec\":\"18\"}"
+      )
+    ]);
+    const secondBlock = block(2, hash("ad02"), firstBlock.hash, [
+      spendInscriptionTx(
+        "tx-move-deploy",
+        "tx-deploy",
+        0,
+        "prl1bob",
+        "5120bob",
+        "prl1alice",
+        "5120alice",
+        "1.00000000"
+      )
+    ]);
+    const chainBlocks = [firstBlock];
+    const indexer = createPersistentPrl20Indexer({
+      pearlRpc: makeMutableRpc(chainBlocks),
+      storage,
+      chain: "pearl-simnet",
+      startHeight: 1,
+      parityCheckEveryNBlocks: 1,
+      parityMode: "post-publish"
+    });
+
+    await indexer.syncToTip();
+    chainBlocks.push(secondBlock);
+    pool.queries = [];
+    const result = await indexer.syncToTip();
+
+    assert.equal(result.readModelMode, "incremental");
+    assert.equal(result.snapshot.network.indexedHeight, 2);
+    assert.equal(result.timings.protocolParityMs >= 0, true);
+    assert.equal(pool.readUtxos.some((row) => row.outpoint === "tx-move-deploy:0"), true);
+    assert.equal(
+      pool.queries.filter((query) => query === "DELETE FROM indexer_read_utxos WHERE manifest_name = $1").length,
+      0
+    );
+  } finally {
+    if (previousMode === undefined) {
+      delete process.env.PRL20_INDEXER_READ_MODEL_MODE;
+    } else {
+      process.env.PRL20_INDEXER_READ_MODEL_MODE = previousMode;
+    }
+  }
+});
+
 test("persistent indexer fails closed when a stored block file is missing", async () => {
   const storeDir = await mkdtemp(join(tmpdir(), "prl20-indexer-missing-block-test-"));
   const deployBlock = block(1, hash("41"), null, [
